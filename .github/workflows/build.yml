@@ -27,7 +27,7 @@ jobs:
           cd build/ios/ipa && zip -r ../Runner.ipa Payload
           
       - name: Upload IPA
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: Runner.ipa
           path: build/ios/Runner.ipa
