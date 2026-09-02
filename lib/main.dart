@@ -190,19 +190,6 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildAvatarColumn(ChatMessage msg) {
-    return Column(
-      children: [
-        _buildAvatar(msg.isMe),
-        const SizedBox(height: 4),
-        Text(
-          _formatTime(msg.time),
-          style: const TextStyle(fontSize: 10, color: Colors.grey),
-        ),
-      ],
-    );
-  }
-
   Widget _buildMessageContent(BuildContext context, ChatMessage msg) {
     final bubbleColor = msg.isMe ? const Color(0xFFFFE4E1) : Colors.white;
 
@@ -231,6 +218,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
 
+    Widget bubbleWithTail;
     if (msg.isMe) {
       final tail = Padding(
         padding: const EdgeInsets.only(top: 12),
@@ -239,29 +227,38 @@ class _ChatScreenState extends State<ChatScreen> {
           painter: _BubbleTailPainter(color: bubbleColor, pointLeft: false),
         ),
       );
-      return Row(
+      bubbleWithTail = Row(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [Flexible(child: bubbleContainer), tail],
       );
+    } else {
+      bubbleWithTail = bubbleContainer;
     }
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
-        const Text(
-          '哥哥宝宝',
-          style: TextStyle(fontSize: 11, color: Colors.grey),
-        ),
+        if (!msg.isMe) ...[
+          const Text(
+            '哥哥宝宝',
+            style: TextStyle(fontSize: 11, color: Colors.grey),
+          ),
+          const SizedBox(height: 4),
+        ],
+        bubbleWithTail,
         const SizedBox(height: 4),
-        bubbleContainer,
+        Text(
+          _formatTime(msg.time),
+          style: const TextStyle(fontSize: 10, color: Colors.grey),
+        ),
       ],
     );
   }
 
   Widget _buildMessageRow(BuildContext context, ChatMessage msg) {
     final maxBubbleWidth = MediaQuery.of(context).size.width * 0.7;
-    final avatarColumn = _buildAvatarColumn(msg);
+    final avatar = _buildAvatar(msg.isMe);
     final content = Flexible(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxBubbleWidth),
@@ -275,8 +272,8 @@ class _ChatScreenState extends State<ChatScreen> {
         mainAxisAlignment: msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: msg.isMe
-            ? [content, const SizedBox(width: 8), avatarColumn]
-            : [avatarColumn, const SizedBox(width: 8), content],
+            ? [content, const SizedBox(width: 4), avatar]
+            : [avatar, const SizedBox(width: 4), content],
       ),
     );
   }
@@ -314,10 +311,10 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Container(
                 height: 36,
                 alignment: Alignment.center,
-                padding: const EdgeInsets.symmetric(horizontal: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 14),
                 decoration: BoxDecoration(
                   color: const Color(0xFFF5F5F5),
-                  borderRadius: BorderRadius.circular(6),
+                  borderRadius: BorderRadius.circular(18),
                 ),
                 child: TextField(
                   controller: _controller,
@@ -332,7 +329,6 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(width: 4),
-            _buildBarIcon(Icons.mic_none),
             _buildBarIcon(Icons.emoji_emotions_outlined),
             _buildBarIcon(Icons.add_circle_outline),
           ],
@@ -373,7 +369,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFFFF5F5),
+      backgroundColor: Colors.white,
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(kToolbarHeight),
         child: Container(
