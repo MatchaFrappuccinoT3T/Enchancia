@@ -176,33 +176,43 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildAvatar(bool isMe) {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(6),
+      borderRadius: BorderRadius.circular(10),
       child: Container(
-        width: 40,
-        height: 40,
+        width: 50,
+        height: 50,
         color: isMe ? const Color(0xFFB0E0E6) : const Color(0xFFE0D0D0),
         alignment: Alignment.center,
         child: Text(
           isMe ? '辰' : '哥',
-          style: const TextStyle(fontSize: 14, color: Colors.black87),
+          style: const TextStyle(fontSize: 16, color: Colors.black87),
         ),
       ),
     );
   }
 
+  Widget _buildAvatarColumn(ChatMessage msg) {
+    return Column(
+      children: [
+        _buildAvatar(msg.isMe),
+        const SizedBox(height: 4),
+        Text(
+          '★ ${_formatTime(msg.time)}',
+          style: const TextStyle(fontSize: 10, color: Colors.grey),
+        ),
+      ],
+    );
+  }
+
   Widget _buildMessageContent(BuildContext context, ChatMessage msg) {
-    final bubbleColor = msg.isMe ? const Color(0xFFFFE4E1) : Colors.white;
+    final bubbleColor = msg.isMe ? const Color(0xFFFFE8E8) : Colors.white;
 
     final bubbleContainer = GestureDetector(
       onLongPressStart: (details) => _showCopyMenu(context, details.globalPosition, msg.text),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         decoration: BoxDecoration(
           color: bubbleColor,
-          borderRadius: BorderRadius.circular(6),
-          border: msg.isMe
-              ? null
-              : const Border(left: BorderSide(color: Color(0xFFFFB6C1), width: 3)),
+          borderRadius: BorderRadius.circular(8),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withOpacity(0.05),
@@ -218,23 +228,21 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
 
-    Widget bubbleWithTail;
-    if (msg.isMe) {
-      final tail = Padding(
-        padding: const EdgeInsets.only(top: 12),
-        child: CustomPaint(
-          size: const Size(6, 10),
-          painter: _BubbleTailPainter(color: bubbleColor, pointLeft: false),
-        ),
-      );
-      bubbleWithTail = Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [Flexible(child: bubbleContainer), tail],
-      );
-    } else {
-      bubbleWithTail = bubbleContainer;
-    }
+    final tail = Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: CustomPaint(
+        size: const Size(10, 18),
+        painter: _BubbleTailPainter(color: bubbleColor, pointLeft: !msg.isMe),
+      ),
+    );
+
+    final bubbleRow = Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: msg.isMe
+          ? [Flexible(child: bubbleContainer), tail]
+          : [tail, Flexible(child: bubbleContainer)],
+    );
 
     return Column(
       crossAxisAlignment: msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -246,19 +254,14 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
           const SizedBox(height: 4),
         ],
-        bubbleWithTail,
-        const SizedBox(height: 4),
-        Text(
-          _formatTime(msg.time),
-          style: const TextStyle(fontSize: 10, color: Colors.grey),
-        ),
+        bubbleRow,
       ],
     );
   }
 
   Widget _buildMessageRow(BuildContext context, ChatMessage msg) {
     final maxBubbleWidth = MediaQuery.of(context).size.width * 0.7;
-    final avatar = _buildAvatar(msg.isMe);
+    final avatarColumn = _buildAvatarColumn(msg);
     final content = Flexible(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxBubbleWidth),
@@ -267,29 +270,33 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 16),
       child: Row(
         mainAxisAlignment: msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: msg.isMe
-            ? [content, const SizedBox(width: 4), avatar]
-            : [avatar, const SizedBox(width: 4), content],
+        children: msg.isMe ? [content, avatarColumn] : [avatarColumn, content],
       ),
     );
   }
 
-  Widget _buildBarIcon(
-    IconData icon, {
-    double size = 24,
-    Color color = Colors.black54,
-    double boxSize = 36,
-  }) {
-    return IconButton(
-      icon: Icon(icon, size: size, color: color),
-      onPressed: () {},
-      padding: EdgeInsets.zero,
-      constraints: BoxConstraints(minWidth: boxSize, minHeight: boxSize),
-      visualDensity: VisualDensity.compact,
+  Widget _buildCircleIcon(IconData icon) {
+    return ClipOval(
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: () {},
+          child: Container(
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.black26, width: 1),
+            ),
+            child: Icon(icon, size: 28, color: Colors.black54),
+          ),
+        ),
+      ),
     );
   }
 
@@ -297,24 +304,21 @@ class _ChatScreenState extends State<ChatScreen> {
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          border: Border(top: BorderSide(color: Color(0xFFE0E0E0), width: 0.5)),
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        color: const Color(0xFFF0F0F0),
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            _buildBarIcon(Icons.keyboard_voice_outlined),
-            const SizedBox(width: 4),
+            _buildCircleIcon(Icons.sensors),
+            const SizedBox(width: 8),
             Expanded(
               child: Container(
-                height: 36,
+                height: 40,
                 alignment: Alignment.center,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
+                padding: const EdgeInsets.symmetric(horizontal: 16),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF5F5F5),
-                  borderRadius: BorderRadius.circular(18),
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
                 ),
                 child: TextField(
                   controller: _controller,
@@ -324,13 +328,16 @@ class _ChatScreenState extends State<ChatScreen> {
                     border: InputBorder.none,
                     isDense: true,
                     contentPadding: EdgeInsets.zero,
+                    suffixIcon: Icon(Icons.mic, size: 18, color: Colors.grey),
+                    suffixIconConstraints: BoxConstraints(minWidth: 24, minHeight: 24),
                   ),
                 ),
               ),
             ),
-            const SizedBox(width: 4),
-            _buildBarIcon(Icons.emoji_emotions_outlined),
-            _buildBarIcon(Icons.add_circle_outline),
+            const SizedBox(width: 8),
+            _buildCircleIcon(Icons.emoji_emotions_outlined),
+            const SizedBox(width: 8),
+            _buildCircleIcon(Icons.add),
           ],
         ),
       ),
