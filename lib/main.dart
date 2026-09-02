@@ -137,6 +137,11 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  String _formatTime(DateTime dt) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
+  }
+
   Future<void> _showCopyMenu(BuildContext context, Offset position, String text) async {
     final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
     final selected = await showMenu<String>(
@@ -171,7 +176,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildAvatar(bool isMe) {
     return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(6),
       child: Container(
         width: 40,
         height: 40,
@@ -185,16 +190,32 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _buildBubble(BuildContext context, ChatMessage msg) {
+  Widget _buildAvatarColumn(ChatMessage msg) {
+    return Column(
+      children: [
+        _buildAvatar(msg.isMe),
+        const SizedBox(height: 4),
+        Text(
+          _formatTime(msg.time),
+          style: const TextStyle(fontSize: 10, color: Colors.grey),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildMessageContent(BuildContext context, ChatMessage msg) {
     final bubbleColor = msg.isMe ? const Color(0xFFFFE4E1) : Colors.white;
 
-    final bubbleContent = GestureDetector(
+    final bubbleContainer = GestureDetector(
       onLongPressStart: (details) => _showCopyMenu(context, details.globalPosition, msg.text),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: bubbleColor,
           borderRadius: BorderRadius.circular(6),
+          border: msg.isMe
+              ? null
+              : const Border(left: BorderSide(color: Color(0xFFFFB6C1), width: 3)),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withOpacity(0.05),
@@ -210,30 +231,41 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
 
-    final tail = Padding(
-      padding: const EdgeInsets.only(top: 12),
-      child: CustomPaint(
-        size: const Size(6, 10),
-        painter: _BubbleTailPainter(color: bubbleColor, pointLeft: !msg.isMe),
-      ),
-    );
+    if (msg.isMe) {
+      final tail = Padding(
+        padding: const EdgeInsets.only(top: 12),
+        child: CustomPaint(
+          size: const Size(6, 10),
+          painter: _BubbleTailPainter(color: bubbleColor, pointLeft: false),
+        ),
+      );
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [Flexible(child: bubbleContainer), tail],
+      );
+    }
 
-    return Row(
-      mainAxisSize: MainAxisSize.min,
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      children: msg.isMe
-          ? [Flexible(child: bubbleContent), tail]
-          : [tail, Flexible(child: bubbleContent)],
+      children: [
+        const Text(
+          '哥哥宝宝',
+          style: TextStyle(fontSize: 11, color: Colors.grey),
+        ),
+        const SizedBox(height: 4),
+        bubbleContainer,
+      ],
     );
   }
 
   Widget _buildMessageRow(BuildContext context, ChatMessage msg) {
     final maxBubbleWidth = MediaQuery.of(context).size.width * 0.7;
-    final avatar = _buildAvatar(msg.isMe);
-    final bubble = Flexible(
+    final avatarColumn = _buildAvatarColumn(msg);
+    final content = Flexible(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxBubbleWidth),
-        child: _buildBubble(context, msg),
+        child: _buildMessageContent(context, msg),
       ),
     );
 
@@ -243,8 +275,8 @@ class _ChatScreenState extends State<ChatScreen> {
         mainAxisAlignment: msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: msg.isMe
-            ? [bubble, const SizedBox(width: 8), avatar]
-            : [avatar, const SizedBox(width: 8), bubble],
+            ? [content, const SizedBox(width: 8), avatarColumn]
+            : [avatarColumn, const SizedBox(width: 8), content],
       ),
     );
   }
@@ -276,7 +308,7 @@ class _ChatScreenState extends State<ChatScreen> {
         child: Row(
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            _buildBarIcon(Icons.mic_none, size: 20, color: Colors.grey, boxSize: 32),
+            _buildBarIcon(Icons.keyboard_voice_outlined),
             const SizedBox(width: 4),
             Expanded(
               child: Container(
@@ -300,6 +332,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
             const SizedBox(width: 4),
+            _buildBarIcon(Icons.mic_none),
             _buildBarIcon(Icons.emoji_emotions_outlined),
             _buildBarIcon(Icons.add_circle_outline),
           ],
@@ -308,30 +341,66 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildBackButton() {
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.arrow_back, color: Colors.black87),
+          onPressed: () {},
+        ),
+        Positioned(
+          right: 4,
+          top: 4,
+          child: Container(
+            padding: const EdgeInsets.all(3),
+            constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+            decoration: const BoxDecoration(
+              color: Colors.redAccent,
+              shape: BoxShape.circle,
+            ),
+            child: const Text(
+              '1',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.white, fontSize: 10, height: 1.2),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
-      appBar: AppBar(
-        backgroundColor: Colors.white,
-        elevation: 0.5,
-        title: Row(
-          children: [
-            CircleAvatar(
-              radius: 18,
-              backgroundColor: const Color(0xFFE0D0D0),
-              child: const Text('哥', style: TextStyle(fontSize: 14)),
+      backgroundColor: const Color(0xFFFFF5F5),
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(kToolbarHeight),
+        child: Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            border: Border(bottom: BorderSide(color: Color(0xFFE0E0E0), width: 0.5)),
+          ),
+          child: AppBar(
+            backgroundColor: Colors.white,
+            elevation: 0,
+            leading: _buildBackButton(),
+            centerTitle: true,
+            title: const Text(
+              '哥哥宝宝',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black),
             ),
-            const SizedBox(width: 8),
-            const Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text('哥哥宝宝',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.black)),
-                Text('在线', style: TextStyle(fontSize: 12, color: Colors.green)),
-              ],
-            ),
-          ],
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.search, color: Colors.black87),
+                onPressed: () {},
+              ),
+              IconButton(
+                icon: const Icon(Icons.more_vert, color: Colors.black87),
+                onPressed: () {},
+              ),
+            ],
+          ),
         ),
       ),
       body: Column(
