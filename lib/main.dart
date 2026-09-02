@@ -198,23 +198,33 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Widget _buildMessageRow(BuildContext context, ChatMessage msg) {
     final maxBubbleWidth = MediaQuery.of(context).size.width * 0.7;
+    final avatar = _buildAvatar(msg.isMe);
+    final bubble = Flexible(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: maxBubbleWidth),
+        child: _buildBubbleColumn(context, msg),
+      ),
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
         mainAxisAlignment: msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _buildAvatar(msg.isMe),
-          const SizedBox(width: 8),
-          Flexible(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: maxBubbleWidth),
-              child: _buildBubbleColumn(context, msg),
-            ),
-          ),
-        ],
+        children: msg.isMe
+            ? [bubble, const SizedBox(width: 8), avatar]
+            : [avatar, const SizedBox(width: 8), bubble],
       ),
+    );
+  }
+
+  Widget _buildBarIcon(IconData icon) {
+    return IconButton(
+      icon: Icon(icon, color: Colors.black54),
+      onPressed: () {},
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
+      visualDensity: VisualDensity.compact,
     );
   }
 
@@ -222,17 +232,15 @@ class _ChatScreenState extends State<ChatScreen> {
     return SafeArea(
       top: false,
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
         decoration: const BoxDecoration(
           color: Colors.white,
           border: Border(top: BorderSide(color: Color(0xFFE0E0E0), width: 0.5)),
         ),
         child: Row(
           children: [
-            IconButton(
-              icon: const Icon(Icons.mic_none, color: Colors.black54),
-              onPressed: () {},
-            ),
+            _buildBarIcon(Icons.mic_none),
+            const SizedBox(width: 4),
             Expanded(
               child: Container(
                 padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -252,14 +260,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 ),
               ),
             ),
-            IconButton(
-              icon: const Icon(Icons.emoji_emotions_outlined, color: Colors.black54),
-              onPressed: () {},
-            ),
-            IconButton(
-              icon: const Icon(Icons.add_circle_outline, color: Colors.black54),
-              onPressed: () {},
-            ),
+            const SizedBox(width: 4),
+            _buildBarIcon(Icons.emoji_emotions_outlined),
+            _buildBarIcon(Icons.add_circle_outline),
           ],
         ),
       ),
