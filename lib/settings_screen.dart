@@ -4,9 +4,26 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
+import 'models.dart';
 import 'settings.dart';
+import 'store.dart';
 
-const Color _accent = Color(0xFF07C160);
+const Color _accent = Color(0xFFE8A0BF);
+
+/// Shared slider look: thin grey track, pink progress, white round thumb with
+/// a soft shadow, no tick marks (requirement 三).
+final SliderThemeData _sliderTheme = SliderThemeData(
+  trackHeight: 2,
+  activeTrackColor: const Color(0xFFE8A0BF),
+  inactiveTrackColor: const Color(0xFFE0E0E0),
+  thumbColor: Colors.white,
+  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 10, elevation: 2),
+  overlayShape: const RoundSliderOverlayShape(overlayRadius: 18),
+  overlayColor: const Color(0x1FE8A0BF),
+  tickMarkShape: SliderTickMarkShape.noTickMark,
+  activeTickMarkColor: Colors.transparent,
+  inactiveTickMarkColor: Colors.transparent,
+);
 
 /// Preset swatches offered by the colour / wallpaper pickers.
 const List<Color> _swatches = [
@@ -19,13 +36,18 @@ const List<Color> _swatches = [
 class SettingsScreen extends StatefulWidget {
   final AppSettings settings;
 
+  /// When set, this screen also edits the project's name / icon / Instructions
+  /// and [settings] is the project's own settings (requirement 五.5).
+  final Project? project;
+
   /// Supplied by the chat screen: writes the current chat log to a txt file
-  /// and opens the share sheet (requirement 二.9).
+  /// and opens the share sheet.
   final Future<void> Function()? onExportChat;
 
   const SettingsScreen({
     super.key,
     required this.settings,
+    this.project,
     this.onExportChat,
   });
 
@@ -329,16 +351,108 @@ class _SettingsScreenState extends State<SettingsScreen> {
           Text(valueLabel, style: const TextStyle(color: Colors.grey)),
         ],
       ),
-      subtitle: Slider(
-        value: value.clamp(min, max),
-        min: min,
-        max: max,
-        divisions: divisions,
-        activeColor: _accent,
-        onChanged: onChanged,
-        onChangeEnd: onChangeEnd,
+      subtitle: SliderTheme(
+        data: _sliderTheme,
+        child: Slider(
+          value: value.clamp(min, max),
+          min: min,
+          max: max,
+          divisions: divisions,
+          onChanged: onChanged,
+          onChangeEnd: onChangeEnd,
+        ),
       ),
     );
+  }
+
+  // --- Project-level editors (requirement 五.5) ---------------
+
+  Future<void> _editProjectName() async {
+    final p = widget.project!;
+    final controller = TextEditingController(text: p.name);
+    final r = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('项目名称'),
+        content: TextField(controller: controller, autofocus: true, maxLength: 24),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    final name = r?.trim();
+    if (name == null || name.isEmpty) return;
+    p.name = name;
+    await Store.saveProject(p);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _editProjectIcon() async {
+    final p = widget.project!;
+    const choices = [
+      '📁', '💬', '💖', '🌸', '🐰', '🍰', '⭐', '🎀',
+      '🌙', '🔮', '📚', '🎨', '🧸', '☕', '🌈', '🦄',
+    ];
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              for (final e in choices)
+                GestureDetector(
+                  onTap: () => Navigator.pop(ctx, e),
+                  child: Text(e, style: const TextStyle(fontSize: 30)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (picked == null) return;
+    p.icon = picked;
+    await Store.saveProject(p);
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _editInstructions() async {
+    final p = widget.project!;
+    final controller = TextEditingController(text: p.instructions);
+    final r = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Instructions'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          minLines: 4,
+          maxLines: 10,
+          decoration: const InputDecoration(
+            hintText: '给这个项目里的 AI 的系统指令…',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (r == null) return;
+    p.instructions = r;
+    // Also mirror into the project's settings map + persist the project.
+    await _s.setInstructions(r);
+    if (mounted) setState(() {});
   }
 
   @override
@@ -346,13 +460,42 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return ListenableBuilder(
       listenable: _s,
       builder: (context, _) {
+        final project = widget.project;
         return Scaffold(
-          appBar: AppBar(title: const Text('设置')),
+          appBar: AppBar(
+              title: Text(project == null ? '设置' : '项目设置')),
           body: ListView(
             children: [
+              if (project != null) ...[
+                _sectionHeader('项目'),
+                _navTile(
+                  title: '项目名称',
+                  trailingText: project.name,
+                  onTap: _editProjectName,
+                ),
+                _navTile(
+                  title: '项目图标',
+                  trailingWidget:
+                      Text(project.icon, style: const TextStyle(fontSize: 24)),
+                  onTap: _editProjectIcon,
+                ),
+                ListTile(
+                  title: const Text('Instructions'),
+                  subtitle: Text(
+                    project.instructions.isEmpty
+                        ? '未设置'
+                        : project.instructions,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: Colors.grey),
+                  ),
+                  trailing: const Icon(Icons.chevron_right, color: Colors.grey),
+                  onTap: _editInstructions,
+                ),
+              ],
               _sectionHeader('个性化'),
               _navTile(
-                title: '新对话默认名称',
+                title: project == null ? '新对话默认名称' : '对话默认名称',
                 trailingText: _s.chatTitle,
                 onTap: _editTitle,
               ),

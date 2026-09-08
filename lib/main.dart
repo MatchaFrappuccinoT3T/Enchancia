@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 
-import 'conversation_list_screen.dart';
+import 'project_list_screen.dart';
 import 'settings.dart';
 import 'store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Store.init();
-  final settings = await AppSettings.load();
+  final settings = Store.loadGlobalSettings();
   runApp(EnchanciaApp(settings: settings));
 }
 
@@ -31,7 +31,6 @@ class EnchanciaApp extends StatelessWidget {
               brightness: brightness,
             ),
             useMaterial3: true,
-            // Kill the pink Material-3 surface tint on menus / dialogs.
             popupMenuTheme: PopupMenuThemeData(
               color: settings.menuColor,
               surfaceTintColor: Colors.transparent,
@@ -44,7 +43,7 @@ class EnchanciaApp extends StatelessWidget {
               surfaceTintColor: Colors.transparent,
             ),
           ),
-          home: ConversationListScreen(settings: settings),
+          home: ProjectListScreen(globalSettings: settings),
         );
       },
     );

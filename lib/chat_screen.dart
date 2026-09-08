@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:audioplayers/audioplayers.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
@@ -28,7 +29,7 @@ const List<String> _placeholderReplies = [
   '哈哈哈是这样嘛',
 ];
 
-enum _Panel { none, emoji, functions }
+enum _Panel { none, emoji }
 
 /// Show a time separator when the gap since the previous message is >= this.
 const Duration _timeSeparatorGap = Duration(minutes: 5);
@@ -67,11 +68,23 @@ class ChatScreen extends StatefulWidget {
   final Conversation conversation;
   final AppSettings settings;
 
+  /// Conversations searchable together (the project's, or just this one).
+  final List<Conversation> siblings;
+
+  /// Mood calendar scope for this conversation (project id or default).
+  final String moodScope;
+
+  /// If set, scroll to the message at this time once loaded.
+  final DateTime? initialJumpTime;
+
   const ChatScreen({
     super.key,
     required this.conversation,
     required this.settings,
-  });
+    List<Conversation>? siblings,
+    this.moodScope = Store.defaultMoodScope,
+    this.initialJumpTime,
+  }) : siblings = siblings ?? const [];
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -117,9 +130,14 @@ class _ChatScreenState extends State<ChatScreen> {
 
   bool get _allHistoryShown => _visibleCount >= _messages.length;
 
+  void _onSettingsChanged() {
+    if (mounted) setState(() {});
+  }
+
   @override
   void initState() {
     super.initState();
+    widget.settings.addListener(_onSettingsChanged);
     _controller.addListener(() => setState(() {}));
     _focusNode.addListener(() {
       if (_focusNode.hasFocus && _panel != _Panel.none) {
@@ -137,11 +155,22 @@ class _ChatScreenState extends State<ChatScreen> {
     _visibleCount =
         _messages.length <= _initialWindow ? _messages.length : _initialWindow;
     _scrollController.addListener(_onScroll);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final jump = widget.initialJumpTime;
+      if (jump != null) {
+        _jumpToTime(jump);
+      } else {
+        _scrollToBottom();
+      }
+    });
   }
+
+  List<Conversation> get _searchScope =>
+      widget.siblings.isEmpty ? [widget.conversation] : widget.siblings;
 
   @override
   void dispose() {
+    widget.settings.removeListener(_onSettingsChanged);
     _highlightTimer?.cancel();
     _controller.dispose();
     _scrollController.dispose();
@@ -189,6 +218,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // --- Sending ------------------------------------------------------
 
+  /// "发送人：摘要" for a quoted message, summary capped at 30 chars.
+  String _quoteLine(ChatMessage q) {
+    final who = q.isMe ? '我' : widget.conversation.name;
+    return '$who：${q.summary}';
+  }
+
   void _sendMessage() {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
@@ -202,7 +237,7 @@ class _ChatScreenState extends State<ChatScreen> {
       time: now,
       metadata: ChatMessage.outgoingMeta(now),
       status: MessageStatus.sending,
-      quotedSummary: q?.summary,
+      quotedSummary: q == null ? null : _quoteLine(q),
       quotedMessageId: q?.id,
     );
     setState(() {
@@ -542,13 +577,38 @@ class _ChatScreenState extends State<ChatScreen> {
   // --- Top bar ---------------------------------------------------
 
   Future<void> _onSearch() async {
-    final picked = await Navigator.of(context).push<DateTime>(
+    final hit = await Navigator.of(context).push<SearchHit>(
       MaterialPageRoute(
         builder: (_) =>
-            SearchScreen(conversation: widget.conversation, settings: _s),
+            SearchScreen(conversations: _searchScope, settings: _s),
       ),
     );
-    if (picked != null && mounted) _jumpToDate(picked);
+    if (hit == null || !mounted) return;
+    if (hit.conversationId == widget.conversation.id) {
+      _jumpToTime(hit.time);
+      return;
+    }
+    final matches =
+        _searchScope.where((c) => c.id == hit.conversationId).toList();
+    if (matches.isEmpty) return;
+    Navigator.of(context).pushReplacement(MaterialPageRoute(
+      builder: (_) => ChatScreen(
+        conversation: matches.first,
+        settings: _s,
+        siblings: widget.siblings,
+        moodScope: widget.moodScope,
+        initialJumpTime: hit.time,
+      ),
+    ));
+  }
+
+  void _jumpToTime(DateTime t) {
+    final matches = _messages.where((m) => m.time == t).toList();
+    if (matches.isNotEmpty) {
+      _highlightAndScroll(matches.first.id);
+    } else {
+      _jumpToDate(t);
+    }
   }
 
   Future<void> _renameConversation() async {
@@ -589,7 +649,8 @@ class _ChatScreenState extends State<ChatScreen> {
         break;
       case 'mood':
         Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => MoodCalendarScreen(settings: _s),
+          builder: (_) =>
+              MoodCalendarScreen(settings: _s, scope: widget.moodScope),
         ));
         break;
       case 'clear':
@@ -720,6 +781,33 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Compact row for a video / file message bubble.
+  Widget _mediaChip(ChatMessage msg, IconData icon, String label, Color color,
+      String tapHint) {
+    return GestureDetector(
+      onTap: () {
+        if (_multiSelect) {
+          _toggleSelect(msg);
+        } else {
+          _showSnack(tapHint);
+        }
+      },
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 30, color: color),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 14, color: color)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildBubble(ChatMessage msg) {
     final bubbleColor =
         msg.isMe ? _s.effectiveMyBubbleColor : _s.effectiveAiBubbleColor;
@@ -742,6 +830,12 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
       );
+    } else if (msg.kind == MessageKind.video) {
+      body = _mediaChip(msg, Icons.play_circle_outline,
+          msg.fileName ?? '视频', textColor, '视频播放开发中');
+    } else if (msg.kind == MessageKind.file) {
+      body = _mediaChip(msg, Icons.insert_drive_file_outlined,
+          msg.fileName ?? '文件', textColor, '文件预览开发中');
     } else {
       final halo = _s.bubbleTextNeedsHalo(msg.isMe);
       body = Text(
@@ -775,24 +869,20 @@ class _ChatScreenState extends State<ChatScreen> {
           GestureDetector(
             onTap: () => _jumpToQuoted(msg.quotedMessageId),
             child: Container(
-              margin: const EdgeInsets.only(bottom: 6),
+              margin: const EdgeInsets.only(bottom: 4),
               padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                  const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
               decoration: BoxDecoration(
-                color: Colors.black.withValues(alpha: 0.06),
+                color: textColor.withValues(alpha: 0.10),
                 borderRadius: BorderRadius.circular(4),
-                border: Border(
-                  left: BorderSide(
-                      color: textColor.withValues(alpha: 0.4), width: 2),
-                ),
               ),
               child: Text(
                 msg.quotedSummary!,
-                maxLines: 2,
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                     fontSize: 12,
-                    color: textColor.withValues(alpha: 0.72)),
+                    color: textColor.withValues(alpha: 0.65)),
               ),
             ),
           ),
@@ -1142,8 +1232,7 @@ class _ChatScreenState extends State<ChatScreen> {
           const SizedBox(width: 2),
           hasText
               ? _buildSendButton()
-              : _iconBtn(Icons.add_circle_outline,
-                  () => _togglePanel(_Panel.functions)),
+              : _iconBtn(Icons.add_circle_outline, _showFunctionSheet),
           const SizedBox(width: 2),
         ],
       ),
@@ -1170,45 +1259,94 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  Widget _funcItem(IconData icon, String label, VoidCallback onTap) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        GestureDetector(
-          onTap: onTap,
-          child: Container(
-            width: 60,
-            height: 60,
-            decoration: BoxDecoration(
-              color: _s.menuColor,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Icon(icon, size: 30, color: _iconColor),
-          ),
-        ),
-        const SizedBox(height: 6),
-        Text(label, style: TextStyle(fontSize: 12, color: _iconColor)),
-      ],
+  // --- "+" function sheet (requirement 四) -------------------
+
+  void _showFunctionSheet() {
+    FocusScope.of(context).unfocus();
+    setState(() => _panel = _Panel.none);
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => FunctionSheet(
+        settings: _s,
+        onPick: (action) {
+          Navigator.of(ctx).pop();
+          _handleFunctionAction(action);
+        },
+      ),
     );
   }
 
-  Widget _buildFunctionPanel() {
-    return Container(
-      height: 200,
-      width: double.infinity,
-      color: _s.panelColor,
-      padding: const EdgeInsets.all(20),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _funcItem(Icons.photo_outlined, '相册',
-              () => _pickAndSendImage(ImageSource.gallery)),
-          const SizedBox(width: 24),
-          _funcItem(Icons.camera_alt_outlined, '拍照',
-              () => _pickAndSendImage(ImageSource.camera)),
-        ],
-      ),
+  void _handleFunctionAction(String action) {
+    switch (action) {
+      case FnAction.photo:
+        _pickAndSendImage(ImageSource.gallery);
+        break;
+      case FnAction.camera:
+        _pickAndSendImage(ImageSource.camera);
+        break;
+      case FnAction.file:
+        _pickAndSendFile();
+        break;
+      case FnAction.video:
+        _pickAndSendVideo();
+        break;
+      default:
+        _showSnack('功能开发中');
+    }
+  }
+
+  Future<void> _pickAndSendVideo() async {
+    try {
+      final XFile? f = await _picker.pickVideo(source: ImageSource.gallery);
+      if (f == null) return;
+      final persisted = await Store.persistFile(f.path, 'vid');
+      if (!mounted) return;
+      _sendAttachment(
+        persisted,
+        kind: MessageKind.video,
+        fileName: f.name,
+      );
+    } catch (e) {
+      _showSnack('无法选择视频：$e');
+    }
+  }
+
+  Future<void> _pickAndSendFile() async {
+    try {
+      final res = await FilePicker.platform.pickFiles();
+      final picked = res?.files.isNotEmpty == true ? res!.files.first : null;
+      final path = picked?.path;
+      if (path == null) return;
+      final persisted = await Store.persistFile(path, 'file');
+      if (!mounted) return;
+      _sendAttachment(
+        persisted,
+        kind: MessageKind.file,
+        fileName: picked!.name,
+      );
+    } catch (e) {
+      _showSnack('无法选择文件：$e');
+    }
+  }
+
+  void _sendAttachment(String path,
+      {required MessageKind kind, String? fileName}) {
+    final now = DateTime.now();
+    final msg = ChatMessage(
+      id: ChatMessage.newId(),
+      mediaPath: path,
+      fileName: fileName,
+      kind: kind,
+      isMe: true,
+      time: now,
+      metadata: ChatMessage.outgoingMeta(now),
+      status: MessageStatus.sending,
     );
+    setState(() => _appendMessage(msg));
+    _persist();
+    _scrollToBottom();
+    _dispatch(msg);
   }
 
   /// Fixed layer under everything (blur + tint mask). Never scrolls.
@@ -1420,7 +1558,6 @@ class _ChatScreenState extends State<ChatScreen> {
                       if (_quoted != null) _quoteBar(),
                       _buildInputBar(),
                       if (_panel == _Panel.emoji) _buildEmojiPanel(),
-                      if (_panel == _Panel.functions) _buildFunctionPanel(),
                     ],
                   ),
                 ),

@@ -5,33 +5,65 @@ import 'package:flutter/material.dart';
 import 'chat_screen.dart';
 import 'models.dart';
 import 'mood_calendar_screen.dart';
+import 'search_screen.dart';
 import 'settings.dart';
+import 'settings_screen.dart';
 import 'store.dart';
 
-/// App home: the list of all conversations (requirement 一).
+/// Conversation list for a project, or for the project-less "普通聊天" bucket
+/// when [project] is null (requirement 五).
 class ConversationListScreen extends StatefulWidget {
-  final AppSettings settings;
-  const ConversationListScreen({super.key, required this.settings});
+  final Project? project;
+  final AppSettings globalSettings;
+
+  const ConversationListScreen({
+    super.key,
+    required this.project,
+    required this.globalSettings,
+  });
 
   @override
   State<ConversationListScreen> createState() => _ConversationListScreenState();
 }
 
 class _ConversationListScreenState extends State<ConversationListScreen> {
-  AppSettings get _s => widget.settings;
+  late final AppSettings _s;
   List<Conversation> _conversations = [];
+
+  Project? get _project => widget.project;
+  String get _moodScope => _project?.id ?? Store.defaultMoodScope;
 
   @override
   void initState() {
     super.initState();
+    _s = _project == null
+        ? widget.globalSettings
+        : Store.projectSettings(_project!);
+    _s.addListener(_onSettings);
     _reload();
   }
 
-  void _reload() => setState(() => _conversations = Store.conversations());
+  void _onSettings() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _s.removeListener(_onSettings);
+    super.dispose();
+  }
+
+  void _reload() => setState(
+      () => _conversations = Store.conversationsFor(_project?.id));
 
   Future<void> _openConversation(Conversation c) async {
     await Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => ChatScreen(conversation: c, settings: _s),
+      builder: (_) => ChatScreen(
+        conversation: c,
+        settings: _s,
+        siblings: _conversations,
+        moodScope: _moodScope,
+      ),
     ));
     if (mounted) _reload();
   }
@@ -64,6 +96,7 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
       id: Conversation.newId(),
       name: trimmed.isEmpty ? '新对话' : trimmed,
       createdAt: DateTime.now(),
+      projectId: _project?.id,
     );
     await Store.saveConversation(conv);
     if (!mounted) return;
@@ -88,6 +121,49 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
       ),
     );
     return ok ?? false;
+  }
+
+  Future<void> _openSearch() async {
+    if (_conversations.isEmpty) return;
+    final hit = await Navigator.of(context).push<SearchHit>(MaterialPageRoute(
+      builder: (_) => SearchScreen(
+        conversations: _conversations,
+        settings: _s,
+      ),
+    ));
+    if (hit == null || !mounted) return;
+    final matches =
+        _conversations.where((c) => c.id == hit.conversationId).toList();
+    if (matches.isEmpty) return;
+    final target = matches.first;
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => ChatScreen(
+        conversation: target,
+        settings: _s,
+        siblings: _conversations,
+        moodScope: _moodScope,
+        initialJumpTime: hit.time,
+      ),
+    ));
+    if (mounted) _reload();
+  }
+
+  void _openMood() {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => MoodCalendarScreen(settings: _s, scope: _moodScope),
+    ));
+  }
+
+  void _openProjectSettings() {
+    final p = _project;
+    if (p == null) return;
+    Navigator.of(context)
+        .push(MaterialPageRoute(
+          builder: (_) => SettingsScreen(settings: _s, project: p),
+        ))
+        .then((_) {
+      if (mounted) setState(() {}); // project name / icon may have changed
+    });
   }
 
   Widget _avatar(Conversation c) {
@@ -115,23 +191,32 @@ class _ConversationListScreenState extends State<ConversationListScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final title = _project?.name ?? '普通聊天';
     return Scaffold(
       backgroundColor: _s.isDark ? const Color(0xFF161616) : Colors.white,
       appBar: AppBar(
-        title: const Text('Enchancia',
-            style: TextStyle(fontWeight: FontWeight.bold)),
+        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
         backgroundColor: _s.appBarColor,
         foregroundColor: _s.appBarTextColor,
         surfaceTintColor: Colors.transparent,
         elevation: 0.5,
         actions: [
           IconButton(
+            tooltip: '搜索',
+            icon: const Icon(Icons.search),
+            onPressed: _openSearch,
+          ),
+          IconButton(
             tooltip: '心情日历',
             icon: const Icon(Icons.emoji_emotions_outlined),
-            onPressed: () => Navigator.of(context).push(MaterialPageRoute(
-              builder: (_) => MoodCalendarScreen(settings: _s),
-            )),
+            onPressed: _openMood,
           ),
+          if (_project != null)
+            IconButton(
+              tooltip: '项目设置',
+              icon: const Icon(Icons.tune),
+              onPressed: _openProjectSettings,
+            ),
           IconButton(
             tooltip: '新建对话',
             icon: const Icon(Icons.add),

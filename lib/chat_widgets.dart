@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 
+import 'settings.dart';
+
 /// Long-press menu action keys.
 class MsgMenu {
   static const copy = 'copy';
@@ -70,8 +72,15 @@ class _MessageMenuState extends State<_MessageMenu>
           children: [
             Icon(icon, color: Colors.white, size: 22),
             const SizedBox(height: 5),
-            Text(label,
-                style: const TextStyle(color: Colors.white, fontSize: 11)),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 11,
+                decoration: TextDecoration.none,
+                fontWeight: FontWeight.normal,
+              ),
+            ),
           ],
         ),
       ),
@@ -130,8 +139,10 @@ class _MessageMenuState extends State<_MessageMenu>
           ),
         );
 
-    return Stack(
-      children: [
+    return Material(
+      type: MaterialType.transparency,
+      child: Stack(
+        children: [
         Positioned(
           left: left,
           top: top,
@@ -174,7 +185,8 @@ class _MessageMenuState extends State<_MessageMenu>
             ),
           ),
         ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -357,6 +369,124 @@ class _FloatingHeartState extends State<FloatingHeart>
           ),
         );
       },
+    );
+  }
+}
+
+/// Actions emitted by [FunctionSheet].
+class FnAction {
+  static const photo = 'photo';
+  static const camera = 'camera';
+  static const file = 'file';
+  static const video = 'video';
+  static const voiceCall = 'voiceCall';
+  static const music = 'music';
+  static const model = 'model';
+}
+
+/// Bottom sheet shown by the "+" button: 2x4 grid, rounded white top,
+/// dismissed by tapping outside or dragging down (requirement 四).
+class FunctionSheet extends StatelessWidget {
+  final AppSettings settings;
+  final ValueChanged<String> onPick;
+
+  const FunctionSheet({
+    super.key,
+    required this.settings,
+    required this.onPick,
+  });
+
+  Widget _item(BuildContext context, IconData icon, String label, String key) {
+    final s = settings;
+    return InkWell(
+      onTap: () => onPick(key),
+      borderRadius: BorderRadius.circular(12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 56,
+            height: 56,
+            decoration: BoxDecoration(
+              color: s.isDark
+                  ? const Color(0xFF3A3A3A)
+                  : const Color(0xFFF2F2F2),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Icon(icon,
+                size: 26,
+                color: s.isDark ? Colors.white70 : Colors.black54),
+          ),
+          const SizedBox(height: 6),
+          Text(label,
+              style: TextStyle(
+                fontSize: 12,
+                color: s.isDark ? Colors.white70 : Colors.black54,
+              )),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final rows = <List<List<Object>>>[
+      [
+        [Icons.photo_outlined, '照片', FnAction.photo],
+        [Icons.camera_alt_outlined, '拍摄', FnAction.camera],
+        [Icons.insert_drive_file_outlined, '文件', FnAction.file],
+        [Icons.videocam_outlined, '视频', FnAction.video],
+      ],
+      [
+        [Icons.call_outlined, '语音通话', FnAction.voiceCall],
+        [Icons.music_note_outlined, '音乐', FnAction.music],
+        [Icons.smart_toy_outlined, '模型', FnAction.model],
+      ],
+    ];
+
+    return SafeArea(
+      top: false,
+      child: Container(
+        decoration: BoxDecoration(
+          color: settings.isDark ? const Color(0xFF1F1F1F) : Colors.white,
+          borderRadius:
+              const BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: Colors.grey.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            for (final row in rows)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 20),
+                child: Row(
+                  children: [
+                    for (var i = 0; i < 4; i++)
+                      Expanded(
+                        child: i < row.length
+                            ? _item(
+                                context,
+                                row[i][0] as IconData,
+                                row[i][1] as String,
+                                row[i][2] as String,
+                              )
+                            : const SizedBox.shrink(),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }

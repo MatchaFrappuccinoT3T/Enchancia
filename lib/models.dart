@@ -192,11 +192,15 @@ class Conversation {
   final DateTime createdAt;
   final List<ChatMessage> messages;
 
+  /// Owning project, or null for a project-less "New chat".
+  String? projectId;
+
   Conversation({
     required this.id,
     required this.name,
     this.aiAvatarPath,
     required this.createdAt,
+    this.projectId,
     List<ChatMessage>? messages,
   }) : messages = messages ?? [];
 
@@ -222,6 +226,7 @@ class Conversation {
         'name': name,
         'aiAvatarPath': aiAvatarPath,
         'createdAt': createdAt.toIso8601String(),
+        'projectId': projectId,
         'messages': messages.map((e) => e.toJson()).toList(),
       };
 
@@ -233,9 +238,57 @@ class Conversation {
       aiAvatarPath: m['aiAvatarPath'] as String?,
       createdAt:
           DateTime.tryParse(m['createdAt'] as String? ?? '') ?? DateTime.now(),
+      projectId: m['projectId'] as String?,
       messages: ((m['messages'] as List?) ?? const [])
           .map((e) => ChatMessage.fromJson(e as Map))
           .toList(),
+    );
+  }
+}
+
+/// A workspace grouping conversations that share settings, an Instructions
+/// prompt and a mood calendar (requirement 五).
+class Project {
+  final String id;
+  String name;
+  String icon; // an emoji
+  final DateTime createdAt;
+  String instructions;
+
+  /// Project-level settings, in [AppSettings.toMap] shape. New conversations in
+  /// the project inherit these.
+  Map<String, dynamic> settings;
+
+  Project({
+    required this.id,
+    required this.name,
+    this.icon = '📁',
+    required this.createdAt,
+    this.instructions = '',
+    Map<String, dynamic>? settings,
+  }) : settings = settings ?? {};
+
+  static String newId() => 'p_${DateTime.now().microsecondsSinceEpoch}';
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'icon': icon,
+        'createdAt': createdAt.toIso8601String(),
+        'instructions': instructions,
+        'settings': settings,
+      };
+
+  factory Project.fromJson(Map json) {
+    final m = json.cast<String, dynamic>();
+    return Project(
+      id: m['id'] as String,
+      name: m['name'] as String? ?? '项目',
+      icon: m['icon'] as String? ?? '📁',
+      createdAt:
+          DateTime.tryParse(m['createdAt'] as String? ?? '') ?? DateTime.now(),
+      instructions: m['instructions'] as String? ?? '',
+      settings: (m['settings'] as Map?)?.cast<String, dynamic>() ?? {},
     );
   }
 }

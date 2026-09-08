@@ -18,7 +18,16 @@ enum _MoodView { all, month, calendar }
 
 class MoodCalendarScreen extends StatefulWidget {
   final AppSettings settings;
-  const MoodCalendarScreen({super.key, required this.settings});
+
+  /// Mood calendar scope: a project id, or [Store.defaultMoodScope] for
+  /// project-less chats (requirement 五.7).
+  final String scope;
+
+  const MoodCalendarScreen({
+    super.key,
+    required this.settings,
+    required this.scope,
+  });
 
   @override
   State<MoodCalendarScreen> createState() => _MoodCalendarScreenState();
@@ -37,7 +46,8 @@ class _MoodCalendarScreenState extends State<MoodCalendarScreen> {
     _reload();
   }
 
-  void _reload() => setState(() => _entries = Store.allMoods());
+  void _reload() =>
+      setState(() => _entries = Store.allMoods(widget.scope));
 
   void _shiftMonth(int delta) =>
       setState(() => _month = DateTime(_month.year, _month.month + delta));
@@ -47,7 +57,7 @@ class _MoodCalendarScreenState extends State<MoodCalendarScreen> {
   // --- Editor -------------------------------------------------------
 
   Future<void> _editDay(DateTime day) async {
-    final entry = Store.moodFor(day);
+    final entry = Store.moodFor(widget.scope, day);
     String? ai = entry.aiEmoji;
     String? me = entry.meEmoji;
 
@@ -127,11 +137,14 @@ class _MoodCalendarScreenState extends State<MoodCalendarScreen> {
                           foregroundColor: Colors.white,
                         ),
                         onPressed: () async {
-                          await Store.saveMood(MoodEntry(
-                            date: dateKey(day),
-                            aiEmoji: ai,
-                            meEmoji: me,
-                          ));
+                          await Store.saveMood(
+                            widget.scope,
+                            MoodEntry(
+                              date: dateKey(day),
+                              aiEmoji: ai,
+                              meEmoji: me,
+                            ),
+                          );
                           if (ctx.mounted) Navigator.of(ctx).pop();
                         },
                         child: const Text('保存'),

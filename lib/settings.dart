@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 /// Font size steps offered in the settings page.
 enum FontSizeLevel { small, medium, large }
@@ -63,7 +62,6 @@ extension NotificationSoundX on NotificationSound {
         NotificationSound.bubble => '泡泡',
       };
 
-  /// Asset path (relative to `assets/`) passed to audioplayers' AssetSource.
   String? get asset => switch (this) {
         NotificationSound.none => null,
         NotificationSound.ding => 'sounds/ding.wav',
@@ -72,29 +70,15 @@ extension NotificationSoundX on NotificationSound {
       };
 }
 
-/// All user-configurable settings, persisted with SharedPreferences.
-///
-/// A single instance lives at the top of the widget tree; screens listen to it
-/// and mutate it through the setters, each of which persists and notifies.
+/// User-configurable chat settings. Backed by a plain map so the same class
+/// serves the app-wide default (persisted in Hive) and each project's own
+/// settings (persisted inside the project record). The owner supplies [writer].
 class AppSettings extends ChangeNotifier {
-  static const _kTitle = 'chatTitle';
-  static const _kMyBubble = 'myBubbleColor';
-  static const _kAiBubble = 'aiBubbleColor';
-  static const _kWallpaperColor = 'wallpaperColor';
-  static const _kWallpaperImage = 'wallpaperImagePath';
-  static const _kMyAvatar = 'myAvatarPath';
-  static const _kAiAvatar = 'aiAvatarPath';
-  static const _kFontSize = 'fontSizeLevel';
-  static const _kTheme = 'themePreset';
-  static const _kSound = 'notificationSound';
-  static const _kMyBubbleOpacity = 'myBubbleOpacity';
-  static const _kAiBubbleOpacity = 'aiBubbleOpacity';
-  static const _kWallpaperBlur = 'wallpaperBlur';
-  static const _kOverlayOpacity = 'overlayOpacity';
-
-  late SharedPreferences _prefs;
+  /// Persistence sink: given the current [toMap], store it. Set by the owner.
+  Future<void> Function(Map<String, dynamic> data)? writer;
 
   String chatTitle = '哥哥宝宝';
+  String instructions = '';
   Color myBubbleColor = ThemePreset.minimalWhite.myBubble;
   Color aiBubbleColor = ThemePreset.minimalWhite.aiBubble;
   int? wallpaperColorValue;
@@ -104,36 +88,85 @@ class AppSettings extends ChangeNotifier {
   FontSizeLevel fontSize = FontSizeLevel.medium;
   ThemePreset theme = ThemePreset.minimalWhite;
   NotificationSound sound = NotificationSound.ding;
-
-  /// 0.0 = fully transparent bubble, 1.0 = opaque. (requirement 一)
   double myBubbleOpacity = 1.0;
   double aiBubbleOpacity = 1.0;
-
-  /// Gaussian blur sigma applied to the wallpaper image, 0..20. (requirement 二)
   double wallpaperBlur = 0.0;
-
-  /// Opacity of the tint layer over the wallpaper, 0..1. (requirement 三)
   double overlayOpacity = 0.0;
 
-  // --- Derived values -------------------------------------------------
+  AppSettings();
+
+  factory AppSettings.fromMap(
+    Map<String, dynamic> data, {
+    Future<void> Function(Map<String, dynamic>)? writer,
+  }) {
+    final s = AppSettings()..writer = writer;
+    s.applyMap(data);
+    return s;
+  }
+
+  // --- Serialization -------------------------------------------------
+
+  Map<String, dynamic> toMap() => {
+        'chatTitle': chatTitle,
+        'instructions': instructions,
+        'myBubbleColor': myBubbleColor.toARGB32(),
+        'aiBubbleColor': aiBubbleColor.toARGB32(),
+        'wallpaperColorValue': wallpaperColorValue,
+        'wallpaperImagePath': wallpaperImagePath,
+        'myAvatarPath': myAvatarPath,
+        'aiAvatarPath': aiAvatarPath,
+        'fontSize': fontSize.index,
+        'theme': theme.index,
+        'sound': sound.index,
+        'myBubbleOpacity': myBubbleOpacity,
+        'aiBubbleOpacity': aiBubbleOpacity,
+        'wallpaperBlur': wallpaperBlur,
+        'overlayOpacity': overlayOpacity,
+      };
+
+  void applyMap(Map<String, dynamic> raw) {
+    final m = raw.cast<String, dynamic>();
+    double d(Object? v, double fb) => (v as num?)?.toDouble() ?? fb;
+    int i(Object? v, int fb) => (v as num?)?.toInt() ?? fb;
+
+    chatTitle = (m['chatTitle'] as String?) ?? chatTitle;
+    instructions = (m['instructions'] as String?) ?? instructions;
+    myBubbleColor = _colorOr(m['myBubbleColor'] as int?, myBubbleColor);
+    aiBubbleColor = _colorOr(m['aiBubbleColor'] as int?, aiBubbleColor);
+    wallpaperColorValue = m['wallpaperColorValue'] as int?;
+    wallpaperImagePath = _existingPath(m['wallpaperImagePath'] as String?);
+    myAvatarPath = _existingPath(m['myAvatarPath'] as String?);
+    aiAvatarPath = _existingPath(m['aiAvatarPath'] as String?);
+    fontSize =
+        FontSizeLevel.values[i(m['fontSize'], fontSize.index).clamp(0, 2)];
+    theme = ThemePreset.values[i(m['theme'], theme.index).clamp(0, 2)];
+    sound = NotificationSound.values[i(m['sound'], sound.index).clamp(0, 3)];
+    myBubbleOpacity = d(m['myBubbleOpacity'], myBubbleOpacity).clamp(0.0, 1.0);
+    aiBubbleOpacity = d(m['aiBubbleOpacity'], aiBubbleOpacity).clamp(0.0, 1.0);
+    wallpaperBlur = d(m['wallpaperBlur'], wallpaperBlur).clamp(0.0, 20.0);
+    overlayOpacity = d(m['overlayOpacity'], overlayOpacity).clamp(0.0, 1.0);
+  }
+
+  Future<void> _flush() async {
+    await writer?.call(toMap());
+  }
+
+  // --- Derived values ---------------------------------------------
 
   bool get isDark => theme.isDark;
 
-  /// Solid chat background: explicit wallpaper colour, else the preset's.
-  Color get chatBackgroundColor =>
-      wallpaperColorValue != null ? Color(wallpaperColorValue!) : theme.chatBackground;
+  Color get chatBackgroundColor => wallpaperColorValue != null
+      ? Color(wallpaperColorValue!)
+      : theme.chatBackground;
 
   Color get appBarColor => isDark ? const Color(0xFF1F1F1F) : Colors.white;
   Color get appBarTextColor => isDark ? Colors.white : Colors.black;
-  Color get panelColor => isDark ? const Color(0xFF262626) : const Color(0xFFF7F7F7);
+  Color get panelColor =>
+      isDark ? const Color(0xFF262626) : const Color(0xFFF7F7F7);
   Color get menuColor => isDark ? const Color(0xFF2C2C2C) : Colors.white;
 
   double get messageFontSize => fontSize.messageFontSize;
 
-  // --- Wallpaper / bubble compositing ------------------------------
-
-  /// Tint layer painted over the wallpaper: white in light themes, black in
-  /// dark ones, so raising [overlayOpacity] always calms the wallpaper down.
   Color get overlayColor => isDark ? Colors.black : Colors.white;
 
   Color get effectiveMyBubbleColor => myBubbleColor
@@ -142,8 +175,6 @@ class AppSettings extends ChangeNotifier {
   Color get effectiveAiBubbleColor => aiBubbleColor
       .withValues(alpha: (aiBubbleColor.a * aiBubbleOpacity).clamp(0.0, 1.0));
 
-  /// Best guess at the colour sitting behind the wallpaper image. We cannot
-  /// sample the image itself, so assume a middling grey biased by the theme.
   Color get _wallpaperBaseColor {
     if (wallpaperColorValue != null) return Color(wallpaperColorValue!);
     if (wallpaperImagePath != null) {
@@ -152,9 +183,6 @@ class AppSettings extends ChangeNotifier {
     return theme.chatBackground;
   }
 
-  /// The colour a reader effectively sees behind bubble text on [isMe]'s side,
-  /// after the wallpaper, the tint layer and the (possibly translucent) bubble
-  /// are composited. Used to pick a legible text colour.
   Color _behindBubbleText(bool isMe) {
     var bg = _wallpaperBaseColor;
     if (overlayOpacity > 0) {
@@ -165,24 +193,18 @@ class AppSettings extends ChangeNotifier {
     return Color.alphaBlend(bubble, bg);
   }
 
-  /// Auto dark/light bubble text depending on what is behind it (requirement 一.3).
   Color bubbleTextColorFor(bool isMe) =>
       _behindBubbleText(isMe).computeLuminance() > 0.5
           ? const Color(0xFF1A1A1A)
           : const Color(0xFFF2F2F2);
 
-  /// When the bubble is very translucent, a faint outline keeps text readable
-  /// over an unknown wallpaper (requirement 一 / 五).
   bool bubbleTextNeedsHalo(bool isMe) {
     final a = (isMe ? effectiveMyBubbleColor : effectiveAiBubbleColor).a;
     return a < 0.35;
   }
 
-  /// Retained for callers that still want a plain theme-based colour.
   Color get bubbleTextColor =>
       isDark ? const Color(0xFFEDEDED) : Colors.black87;
-
-  // --- Input field (judged on its own background, requirement 四) --
 
   Color get inputFieldColor =>
       isDark ? const Color(0xFF2C2C2C) : Colors.white;
@@ -191,170 +213,127 @@ class AppSettings extends ChangeNotifier {
       ? const Color(0xFF1A1A1A)
       : const Color(0xFFF2F2F2);
 
-  Color get inputCursorColor => const Color(0xFF07C160);
+  Color get inputCursorColor => const Color(0xFFE8A0BF);
 
-  // --- Loading ------------------------------------------------------
-
-  static Future<AppSettings> load() async {
-    final s = AppSettings();
-    s._prefs = await SharedPreferences.getInstance();
-    s._readAll();
-    return s;
-  }
-
-  void _readAll() {
-    final p = _prefs;
-    chatTitle = p.getString(_kTitle) ?? chatTitle;
-    myBubbleColor = _colorOr(p.getInt(_kMyBubble), myBubbleColor);
-    aiBubbleColor = _colorOr(p.getInt(_kAiBubble), aiBubbleColor);
-    wallpaperColorValue = p.getInt(_kWallpaperColor);
-    wallpaperImagePath = _existingPath(p.getString(_kWallpaperImage));
-    myAvatarPath = _existingPath(p.getString(_kMyAvatar));
-    aiAvatarPath = _existingPath(p.getString(_kAiAvatar));
-    fontSize = FontSizeLevel
-        .values[(p.getInt(_kFontSize) ?? fontSize.index).clamp(0, 2)];
-    theme = ThemePreset
-        .values[(p.getInt(_kTheme) ?? theme.index).clamp(0, 2)];
-    sound = NotificationSound
-        .values[(p.getInt(_kSound) ?? sound.index).clamp(0, 3)];
-    myBubbleOpacity =
-        (p.getDouble(_kMyBubbleOpacity) ?? myBubbleOpacity).clamp(0.0, 1.0);
-    aiBubbleOpacity =
-        (p.getDouble(_kAiBubbleOpacity) ?? aiBubbleOpacity).clamp(0.0, 1.0);
-    wallpaperBlur =
-        (p.getDouble(_kWallpaperBlur) ?? wallpaperBlur).clamp(0.0, 20.0);
-    overlayOpacity =
-        (p.getDouble(_kOverlayOpacity) ?? overlayOpacity).clamp(0.0, 1.0);
-  }
+  // --- Helpers --------------------------------------------------
 
   static Color _colorOr(int? v, Color fallback) =>
       v != null ? Color(v) : fallback;
 
-  /// Drop a stored path if the file is gone (e.g. app data cleared).
   static String? _existingPath(String? path) {
     if (path == null) return null;
     return File(path).existsSync() ? path : null;
   }
 
-  // --- Setters (persist + notify) ---------------------------------
+  // --- Setters (flush + notify) --------------------------------
 
   Future<void> setChatTitle(String value) async {
     chatTitle = value.trim().isEmpty ? '哥哥宝宝' : value.trim();
-    await _prefs.setString(_kTitle, chatTitle);
+    await _flush();
+    notifyListeners();
+  }
+
+  Future<void> setInstructions(String value) async {
+    instructions = value;
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setMyBubbleColor(Color c) async {
     myBubbleColor = c;
-    await _prefs.setInt(_kMyBubble, _argb(c));
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setAiBubbleColor(Color c) async {
     aiBubbleColor = c;
-    await _prefs.setInt(_kAiBubble, _argb(c));
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setWallpaperColor(Color c) async {
-    wallpaperColorValue = _argb(c);
+    wallpaperColorValue = c.toARGB32();
     wallpaperImagePath = null;
-    await _prefs.setInt(_kWallpaperColor, wallpaperColorValue!);
-    await _prefs.remove(_kWallpaperImage);
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setWallpaperImage(String srcPath) async {
-    final stored = await _persistImage(srcPath, 'wallpaper', wallpaperImagePath);
-    wallpaperImagePath = stored;
+    wallpaperImagePath =
+        await _persistImage(srcPath, 'wallpaper', wallpaperImagePath);
     wallpaperColorValue = null;
-    await _prefs.setString(_kWallpaperImage, stored);
-    await _prefs.remove(_kWallpaperColor);
+    await _flush();
     notifyListeners();
   }
 
   Future<void> clearWallpaper() async {
     wallpaperImagePath = null;
     wallpaperColorValue = null;
-    await _prefs.remove(_kWallpaperImage);
-    await _prefs.remove(_kWallpaperColor);
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setMyAvatar(String srcPath) async {
     myAvatarPath = await _persistImage(srcPath, 'my_avatar', myAvatarPath);
-    await _prefs.setString(_kMyAvatar, myAvatarPath!);
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setAiAvatar(String srcPath) async {
     aiAvatarPath = await _persistImage(srcPath, 'ai_avatar', aiAvatarPath);
-    await _prefs.setString(_kAiAvatar, aiAvatarPath!);
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setFontSize(FontSizeLevel level) async {
     fontSize = level;
-    await _prefs.setInt(_kFontSize, level.index);
+    await _flush();
     notifyListeners();
   }
 
   Future<void> setSound(NotificationSound value) async {
     sound = value;
-    await _prefs.setInt(_kSound, value.index);
+    await _flush();
     notifyListeners();
   }
 
-  /// Slider setters notify on every drag tick for a live preview but only write
-  /// to disk when [save] is true (pass `false` on `onChanged`, `true` on
-  /// `onChangeEnd`).
   Future<void> setMyBubbleOpacity(double v, {bool save = true}) async {
     myBubbleOpacity = v.clamp(0.0, 1.0);
-    if (save) await _prefs.setDouble(_kMyBubbleOpacity, myBubbleOpacity);
+    if (save) await _flush();
     notifyListeners();
   }
 
   Future<void> setAiBubbleOpacity(double v, {bool save = true}) async {
     aiBubbleOpacity = v.clamp(0.0, 1.0);
-    if (save) await _prefs.setDouble(_kAiBubbleOpacity, aiBubbleOpacity);
+    if (save) await _flush();
     notifyListeners();
   }
 
   Future<void> setWallpaperBlur(double v, {bool save = true}) async {
     wallpaperBlur = v.clamp(0.0, 20.0);
-    if (save) await _prefs.setDouble(_kWallpaperBlur, wallpaperBlur);
+    if (save) await _flush();
     notifyListeners();
   }
 
   Future<void> setOverlayOpacity(double v, {bool save = true}) async {
     overlayOpacity = v.clamp(0.0, 1.0);
-    if (save) await _prefs.setDouble(_kOverlayOpacity, overlayOpacity);
+    if (save) await _flush();
     notifyListeners();
   }
 
-  /// Applying a preset also resets the bubble colours and clears any custom
-  /// wallpaper, so the preset looks the way it is meant to out of the box.
   Future<void> applyPreset(ThemePreset preset) async {
     theme = preset;
     myBubbleColor = preset.myBubble;
     aiBubbleColor = preset.aiBubble;
     wallpaperColorValue = null;
     wallpaperImagePath = null;
-    await _prefs.setInt(_kTheme, preset.index);
-    await _prefs.setInt(_kMyBubble, _argb(preset.myBubble));
-    await _prefs.setInt(_kAiBubble, _argb(preset.aiBubble));
-    await _prefs.remove(_kWallpaperColor);
-    await _prefs.remove(_kWallpaperImage);
+    await _flush();
     notifyListeners();
   }
 
-  // --- Helpers ----------------------------------------------------
-
-  static int _argb(Color c) => c.toARGB32();
-
   /// Copy a picked image into the app documents directory (persistent, never a
-  /// temp dir — requirement 五) under a fresh, unique name so FileImage's
-  /// path-keyed cache always picks up the new file. Deletes the previous copy.
+  /// temp dir) under a fresh, unique name so FileImage's path-keyed cache
+  /// always picks up the new file. Deletes the previous copy.
   static Future<String> _persistImage(
       String srcPath, String name, String? previous) async {
     final base = await getApplicationDocumentsDirectory();

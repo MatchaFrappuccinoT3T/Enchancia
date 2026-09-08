@@ -6,17 +6,31 @@ import 'image_viewer.dart';
 import 'models.dart';
 import 'settings.dart';
 
-const Color _accent = Color(0xFF07C160);
+const Color _accent = Color(0xFFE8A0BF);
 
-/// In-conversation search (requirement 二). Pops with a [DateTime] when the
-/// user picks a day / a result, so the chat screen can scroll there.
+/// Where a search result points: a conversation + the message's time, so the
+/// caller can open that conversation and scroll to it.
+class SearchHit {
+  final String conversationId;
+  final DateTime time;
+  const SearchHit(this.conversationId, this.time);
+}
+
+class _Located {
+  final Conversation conv;
+  final ChatMessage msg;
+  const _Located(this.conv, this.msg);
+}
+
+/// Project-wide search across every conversation in [conversations]
+/// (requirement 五.8). Pops with a [SearchHit].
 class SearchScreen extends StatefulWidget {
-  final Conversation conversation;
+  final List<Conversation> conversations;
   final AppSettings settings;
 
   const SearchScreen({
     super.key,
-    required this.conversation,
+    required this.conversations,
     required this.settings,
   });
 
@@ -28,7 +42,7 @@ class _SearchScreenState extends State<SearchScreen> {
   final TextEditingController _controller = TextEditingController();
   String _query = '';
 
-  List<ChatMessage> get _messages => widget.conversation.messages;
+  bool get _multi => widget.conversations.length > 1;
 
   @override
   void dispose() {
@@ -36,41 +50,42 @@ class _SearchScreenState extends State<SearchScreen> {
     super.dispose();
   }
 
-  Future<void> _openDateCalendar() async {
-    final picked = await Navigator.of(context).push<DateTime>(
-      MaterialPageRoute(
-        builder: (_) =>
-            DateCalendarScreen(conversation: widget.conversation),
-      ),
-    );
-    if (picked != null && mounted) Navigator.of(context).pop(picked);
-  }
-
-  void _push(Widget page) {
-    Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
-  }
-
-  List<ChatMessage> get _results {
+  List<_Located> get _results {
     final q = _query.trim().toLowerCase();
     if (q.isEmpty) return const [];
-    return _messages
-        .where((m) => (m.text ?? '').toLowerCase().contains(q))
-        .toList()
-        .reversed
-        .toList();
+    final out = <_Located>[];
+    for (final c in widget.conversations) {
+      for (final m in c.messages.reversed) {
+        if ((m.text ?? '').toLowerCase().contains(q)) {
+          out.add(_Located(c, m));
+        }
+      }
+    }
+    out.sort((a, b) => b.msg.time.compareTo(a.msg.time));
+    return out;
+  }
+
+  void _push(Widget page) =>
+      Navigator.of(context).push(MaterialPageRoute(builder: (_) => page));
+
+  Future<void> _openDateCalendar() async {
+    final hit = await Navigator.of(context).push<SearchHit>(
+      MaterialPageRoute(
+        builder: (_) => DateCalendarScreen(conversations: widget.conversations),
+      ),
+    );
+    if (hit != null && mounted) Navigator.of(context).pop(hit);
   }
 
   Widget _categoryChips() {
-    Widget chip(IconData icon, String label, VoidCallback onTap) {
-      return Padding(
-        padding: const EdgeInsets.only(right: 10),
-        child: ActionChip(
-          avatar: Icon(icon, size: 18),
-          label: Text(label),
-          onPressed: onTap,
-        ),
-      );
-    }
+    Widget chip(IconData icon, String label, VoidCallback onTap) => Padding(
+          padding: const EdgeInsets.only(right: 10),
+          child: ActionChip(
+            avatar: Icon(icon, size: 18),
+            label: Text(label),
+            onPressed: onTap,
+          ),
+        );
 
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -79,9 +94,9 @@ class _SearchScreenState extends State<SearchScreen> {
         children: [
           chip(Icons.calendar_today_outlined, '日期', _openDateCalendar),
           chip(Icons.perm_media_outlined, '图片与视频',
-              () => _push(MediaGridScreen(conversation: widget.conversation))),
+              () => _push(MediaGridScreen(conversations: widget.conversations))),
           chip(Icons.insert_drive_file_outlined, '文件',
-              () => _push(FileListScreen(conversation: widget.conversation))),
+              () => _push(FileListScreen(conversations: widget.conversations))),
         ],
       ),
     );
@@ -110,14 +125,19 @@ class _SearchScreenState extends State<SearchScreen> {
         itemCount: results.length,
         separatorBuilder: (_, __) => const Divider(height: 1),
         itemBuilder: (context, index) {
-          final m = results[index];
+          final r = results[index];
           return ListTile(
-            leading: Icon(m.isMe ? Icons.person : Icons.face,
+            leading: Icon(r.msg.isMe ? Icons.person : Icons.face,
                 color: Colors.black45),
-            title: Text.rich(_highlight(m.text ?? '', _query.trim())),
-            subtitle: Text(formatFullStamp(m.time),
-                style: const TextStyle(fontSize: 12)),
-            onTap: () => Navigator.of(context).pop(m.time),
+            title: Text.rich(_highlight(r.msg.text ?? '', _query.trim())),
+            subtitle: Text(
+              _multi
+                  ? '${r.conv.name} · ${formatFullStamp(r.msg.time)}'
+                  : formatFullStamp(r.msg.time),
+              style: const TextStyle(fontSize: 12),
+            ),
+            onTap: () =>
+                Navigator.of(context).pop(SearchHit(r.conv.id, r.msg.time)),
           );
         },
       ),
@@ -125,10 +145,10 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   TextSpan _highlight(String text, String query) {
-    final base = const TextStyle(color: Colors.black87, fontSize: 14);
+    const base = TextStyle(color: Colors.black87, fontSize: 14);
     const hit = TextStyle(
         color: _accent, fontSize: 14, fontWeight: FontWeight.bold);
-    if (query.isEmpty) return TextSpan(text: text, style: base);
+    if (query.isEmpty) return const TextSpan(text: '', style: base);
     final spans = <TextSpan>[];
     final lower = text.toLowerCase();
     final q = query.toLowerCase();
@@ -215,10 +235,10 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 }
 
-/// Calendar "find by date" view (requirement 二.4).
+/// Calendar "find by date" across all conversations in scope.
 class DateCalendarScreen extends StatefulWidget {
-  final Conversation conversation;
-  const DateCalendarScreen({super.key, required this.conversation});
+  final List<Conversation> conversations;
+  const DateCalendarScreen({super.key, required this.conversations});
 
   @override
   State<DateCalendarScreen> createState() => _DateCalendarScreenState();
@@ -233,12 +253,23 @@ class _DateCalendarScreenState extends State<DateCalendarScreen> {
     super.initState();
     final now = DateTime.now();
     _month = DateTime(now.year, now.month);
-    _daysWithMessages =
-        widget.conversation.messages.map((m) => dateKey(m.time)).toSet();
+    _daysWithMessages = {
+      for (final c in widget.conversations)
+        for (final m in c.messages) dateKey(m.time),
+    };
   }
 
-  void _shiftMonth(int delta) {
-    setState(() => _month = DateTime(_month.year, _month.month + delta));
+  void _shiftMonth(int delta) =>
+      setState(() => _month = DateTime(_month.year, _month.month + delta));
+
+  SearchHit? _hitFor(DateTime day) {
+    final key = dateKey(day);
+    for (final c in widget.conversations) {
+      for (final m in c.messages) {
+        if (dateKey(m.time) == key) return SearchHit(c.id, m.time);
+      }
+    }
+    return null;
   }
 
   @override
@@ -290,10 +321,12 @@ class _DateCalendarScreenState extends State<DateCalendarScreen> {
                   else
                     _DayCell(
                       day: day,
-                      hasMessages:
-                          _daysWithMessages.contains(dateKey(day)),
+                      hasMessages: _daysWithMessages.contains(dateKey(day)),
                       onTap: _daysWithMessages.contains(dateKey(day))
-                          ? () => Navigator.of(context).pop(day)
+                          ? () {
+                              final hit = _hitFor(day);
+                              if (hit != null) Navigator.of(context).pop(hit);
+                            }
                           : null,
                     ),
               ],
@@ -323,8 +356,7 @@ class _DayCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final isToday = dateKey(day) == dateKey(now);
+    final isToday = dateKey(day) == dateKey(DateTime.now());
     return InkWell(
       onTap: onTap,
       child: Center(
@@ -337,7 +369,7 @@ class _DayCell extends StatelessWidget {
               alignment: Alignment.center,
               decoration: isToday
                   ? BoxDecoration(
-                      color: _accent.withValues(alpha: 0.15),
+                      color: _accent.withValues(alpha: 0.2),
                       shape: BoxShape.circle,
                     )
                   : null,
@@ -367,18 +399,19 @@ class _DayCell extends StatelessWidget {
   }
 }
 
-/// Grid of every image / video sent in the conversation (requirement 二.5).
+/// Grid of every image / video sent across the scoped conversations.
 class MediaGridScreen extends StatelessWidget {
-  final Conversation conversation;
-  const MediaGridScreen({super.key, required this.conversation});
+  final List<Conversation> conversations;
+  const MediaGridScreen({super.key, required this.conversations});
 
   @override
   Widget build(BuildContext context) {
-    final media = conversation.messages
-        .where((m) => m.isMedia && m.mediaPath != null)
-        .toList()
-        .reversed
-        .toList();
+    final media = [
+      for (final c in conversations)
+        for (final m in c.messages)
+          if (m.isMedia && m.mediaPath != null) m,
+    ]..sort((a, b) => b.time.compareTo(a.time));
+
     return Scaffold(
       appBar: AppBar(title: const Text('图片与视频')),
       body: media.isEmpty
@@ -388,8 +421,7 @@ class MediaGridScreen extends StatelessWidget {
             )
           : GridView.builder(
               padding: const EdgeInsets.all(2),
-              gridDelegate:
-                  const SliverGridDelegateWithFixedCrossAxisCount(
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: 3,
                 mainAxisSpacing: 2,
                 crossAxisSpacing: 2,
@@ -397,16 +429,31 @@ class MediaGridScreen extends StatelessWidget {
               itemCount: media.length,
               itemBuilder: (context, index) {
                 final m = media[index];
+                final isVideo = m.kind == MessageKind.video;
                 return GestureDetector(
-                  onTap: () =>
-                      Navigator.of(context).push(MaterialPageRoute(
-                    builder: (_) => ImageViewerScreen(
-                        path: m.mediaPath!, heroTag: 'grid_${m.id}'),
-                  )),
-                  child: Hero(
-                    tag: 'grid_${m.id}',
-                    child: Image.file(File(m.mediaPath!),
-                        fit: BoxFit.cover),
+                  onTap: isVideo
+                      ? null
+                      : () => Navigator.of(context).push(MaterialPageRoute(
+                            builder: (_) => ImageViewerScreen(
+                                path: m.mediaPath!, heroTag: 'grid_${m.id}'),
+                          )),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      if (isVideo)
+                        Container(
+                          color: Colors.black87,
+                          alignment: Alignment.center,
+                          child: const Icon(Icons.videocam,
+                              color: Colors.white70, size: 28),
+                        )
+                      else
+                        Hero(
+                          tag: 'grid_${m.id}',
+                          child: Image.file(File(m.mediaPath!),
+                              fit: BoxFit.cover),
+                        ),
+                    ],
                   ),
                 );
               },
@@ -415,18 +462,19 @@ class MediaGridScreen extends StatelessWidget {
   }
 }
 
-/// List of every file sent in the conversation (requirement 二.6).
+/// List of every file sent across the scoped conversations.
 class FileListScreen extends StatelessWidget {
-  final Conversation conversation;
-  const FileListScreen({super.key, required this.conversation});
+  final List<Conversation> conversations;
+  const FileListScreen({super.key, required this.conversations});
 
   @override
   Widget build(BuildContext context) {
-    final files = conversation.messages
-        .where((m) => m.kind == MessageKind.file)
-        .toList()
-        .reversed
-        .toList();
+    final files = [
+      for (final c in conversations)
+        for (final m in c.messages)
+          if (m.kind == MessageKind.file) m,
+    ]..sort((a, b) => b.time.compareTo(a.time));
+
     return Scaffold(
       appBar: AppBar(title: const Text('文件')),
       body: files.isEmpty
