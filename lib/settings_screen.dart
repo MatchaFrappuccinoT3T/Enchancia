@@ -312,6 +312,35 @@ class _SettingsScreenState extends State<SettingsScreen> {
     );
   }
 
+  Widget _sliderTile({
+    required String title,
+    required double value,
+    required double min,
+    required double max,
+    required int divisions,
+    required String valueLabel,
+    required ValueChanged<double> onChanged,
+    required ValueChanged<double> onChangeEnd,
+  }) {
+    return ListTile(
+      title: Row(
+        children: [
+          Expanded(child: Text(title)),
+          Text(valueLabel, style: const TextStyle(color: Colors.grey)),
+        ],
+      ),
+      subtitle: Slider(
+        value: value.clamp(min, max),
+        min: min,
+        max: max,
+        divisions: divisions,
+        activeColor: _accent,
+        onChanged: onChanged,
+        onChangeEnd: onChangeEnd,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
@@ -371,6 +400,47 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onSelectionChanged: (set) => _s.setFontSize(set.first),
                   ),
                 ),
+              ),
+              _sectionHeader('气泡与背景效果'),
+              _sliderTile(
+                title: '我的气泡不透明度',
+                value: _s.myBubbleOpacity,
+                min: 0,
+                max: 1,
+                divisions: 20,
+                valueLabel: '${(_s.myBubbleOpacity * 100).round()}%',
+                onChanged: (v) => _s.setMyBubbleOpacity(v, save: false),
+                onChangeEnd: (v) => _s.setMyBubbleOpacity(v),
+              ),
+              _sliderTile(
+                title: '对方气泡不透明度',
+                value: _s.aiBubbleOpacity,
+                min: 0,
+                max: 1,
+                divisions: 20,
+                valueLabel: '${(_s.aiBubbleOpacity * 100).round()}%',
+                onChanged: (v) => _s.setAiBubbleOpacity(v, save: false),
+                onChangeEnd: (v) => _s.setAiBubbleOpacity(v),
+              ),
+              _sliderTile(
+                title: '背景模糊',
+                value: _s.wallpaperBlur,
+                min: 0,
+                max: 20,
+                divisions: 20,
+                valueLabel: _s.wallpaperBlur.toStringAsFixed(0),
+                onChanged: (v) => _s.setWallpaperBlur(v, save: false),
+                onChangeEnd: (v) => _s.setWallpaperBlur(v),
+              ),
+              _sliderTile(
+                title: '遮罩浓度',
+                value: _s.overlayOpacity,
+                min: 0,
+                max: 1,
+                divisions: 20,
+                valueLabel: '${(_s.overlayOpacity * 100).round()}%',
+                onChanged: (v) => _s.setOverlayOpacity(v, save: false),
+                onChangeEnd: (v) => _s.setOverlayOpacity(v),
               ),
               _sectionHeader('主题（切换会重置气泡颜色和壁纸）'),
               for (final preset in ThemePreset.values)

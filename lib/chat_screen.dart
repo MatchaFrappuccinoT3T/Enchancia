@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui' as ui;
+
+// `ui.ImageFilter` is used for the wallpaper Gaussian blur.
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
@@ -513,7 +516,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildBubble(ChatMessage msg) {
-    final bubbleColor = msg.isMe ? _s.myBubbleColor : _s.aiBubbleColor;
+    final bubbleColor =
+        msg.isMe ? _s.effectiveMyBubbleColor : _s.effectiveAiBubbleColor;
     final isImage = msg.kind == MessageKind.image;
 
     Widget inner;
@@ -533,12 +537,25 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       );
     } else {
+      final textColor = _s.bubbleTextColorFor(msg.isMe);
+      final halo = _s.bubbleTextNeedsHalo(msg.isMe);
       inner = Text(
         msg.text ?? '',
         style: TextStyle(
           fontSize: _s.messageFontSize,
-          color: _s.bubbleTextColor,
+          color: textColor,
           height: 1.3,
+          shadows: halo
+              ? [
+                  Shadow(
+                    blurRadius: 3,
+                    color: (textColor.computeLuminance() > 0.5
+                            ? Colors.black
+                            : Colors.white)
+                        .withValues(alpha: 0.6),
+                  ),
+                ]
+              : null,
         ),
       );
     }
@@ -689,7 +706,7 @@ class _ChatScreenState extends State<ChatScreen> {
               constraints: const BoxConstraints(minHeight: 38),
               padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
-                color: _s.isDark ? const Color(0xFF2C2C2C) : Colors.white,
+                color: _s.inputFieldColor,
                 borderRadius: BorderRadius.circular(5),
               ),
               child: TextField(
@@ -699,11 +716,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 maxLines: 6,
                 keyboardType: TextInputType.multiline,
                 textInputAction: TextInputAction.newline,
-                cursorColor: const Color(0xFF07C160),
-                style: TextStyle(fontSize: 16, color: _s.bubbleTextColor),
-                decoration: const InputDecoration(
+                // Judged on the input field's own background, not the global
+                // bubble text colour (requirement 四).
+                cursorColor: _s.inputCursorColor,
+                style: TextStyle(fontSize: 16, color: _s.inputTextColor),
+                decoration: InputDecoration(
                   border: InputBorder.none,
                   isCollapsed: true,
+                  hintStyle: TextStyle(
+                      color: _s.inputTextColor.withValues(alpha: 0.4)),
                 ),
               ),
             ),
@@ -787,9 +808,39 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  /// Fixed layer under everything (requirement 二 / 三): base colour, wallpaper
+  /// image, a Gaussian blur via BackdropFilter, then an adjustable tint mask.
+  /// It never scrolls with the message list.
+  Widget _wallpaperLayer() {
+    final img = _s.wallpaperImagePath;
+    final hasImage = img != null && File(img).existsSync();
+    return Positioned.fill(
+      child: ClipRect(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            ColoredBox(color: _s.chatBackgroundColor),
+            if (hasImage) Image.file(File(img!), fit: BoxFit.cover),
+            if (hasImage && _s.wallpaperBlur > 0)
+              BackdropFilter(
+                filter: ui.ImageFilter.blur(
+                  sigmaX: _s.wallpaperBlur,
+                  sigmaY: _s.wallpaperBlur,
+                ),
+                child: const SizedBox.expand(),
+              ),
+            if (_s.overlayOpacity > 0)
+              ColoredBox(
+                color: _s.overlayColor.withValues(alpha: _s.overlayOpacity),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final wallpaper = _s.wallpaperImagePath;
     return Scaffold(
       backgroundColor: _s.chatBackgroundColor,
       appBar: PreferredSize(
@@ -846,10 +897,7 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
       body: Stack(
         children: [
-          if (wallpaper != null && File(wallpaper).existsSync())
-            Positioned.fill(
-              child: Image.file(File(wallpaper), fit: BoxFit.cover),
-            ),
+          _wallpaperLayer(),
           Column(
             children: [
               Expanded(

@@ -80,10 +80,11 @@ class Store {
 
   // --- Media files ------------------------------------------------
 
-  /// Copy a picked file into permanent app storage so it survives restarts and
-  /// the OS clearing the image_picker cache. Returns the new path.
+  /// Copy a picked file into the app documents directory (persistent, never a
+  /// temp dir) so it survives restarts and the OS clearing the image_picker
+  /// cache. Returns the new path.
   static Future<String> persistFile(String srcPath, String prefix) async {
-    final dir = await getApplicationSupportDirectory();
+    final dir = await getApplicationDocumentsDirectory();
     final media = Directory('${dir.path}/media');
     if (!media.existsSync()) media.createSync(recursive: true);
     final ext = srcPath.contains('.')

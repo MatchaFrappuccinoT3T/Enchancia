@@ -87,6 +87,10 @@ class AppSettings extends ChangeNotifier {
   static const _kFontSize = 'fontSizeLevel';
   static const _kTheme = 'themePreset';
   static const _kSound = 'notificationSound';
+  static const _kMyBubbleOpacity = 'myBubbleOpacity';
+  static const _kAiBubbleOpacity = 'aiBubbleOpacity';
+  static const _kWallpaperBlur = 'wallpaperBlur';
+  static const _kOverlayOpacity = 'overlayOpacity';
 
   late SharedPreferences _prefs;
 
@@ -101,6 +105,16 @@ class AppSettings extends ChangeNotifier {
   ThemePreset theme = ThemePreset.minimalWhite;
   NotificationSound sound = NotificationSound.ding;
 
+  /// 0.0 = fully transparent bubble, 1.0 = opaque. (requirement 一)
+  double myBubbleOpacity = 1.0;
+  double aiBubbleOpacity = 1.0;
+
+  /// Gaussian blur sigma applied to the wallpaper image, 0..20. (requirement 二)
+  double wallpaperBlur = 0.0;
+
+  /// Opacity of the tint layer over the wallpaper, 0..1. (requirement 三)
+  double overlayOpacity = 0.0;
+
   // --- Derived values -------------------------------------------------
 
   bool get isDark => theme.isDark;
@@ -109,15 +123,75 @@ class AppSettings extends ChangeNotifier {
   Color get chatBackgroundColor =>
       wallpaperColorValue != null ? Color(wallpaperColorValue!) : theme.chatBackground;
 
-  Color get bubbleTextColor =>
-      isDark ? const Color(0xFFEDEDED) : Colors.black87;
-
   Color get appBarColor => isDark ? const Color(0xFF1F1F1F) : Colors.white;
   Color get appBarTextColor => isDark ? Colors.white : Colors.black;
   Color get panelColor => isDark ? const Color(0xFF262626) : const Color(0xFFF7F7F7);
   Color get menuColor => isDark ? const Color(0xFF2C2C2C) : Colors.white;
 
   double get messageFontSize => fontSize.messageFontSize;
+
+  // --- Wallpaper / bubble compositing ------------------------------
+
+  /// Tint layer painted over the wallpaper: white in light themes, black in
+  /// dark ones, so raising [overlayOpacity] always calms the wallpaper down.
+  Color get overlayColor => isDark ? Colors.black : Colors.white;
+
+  Color get effectiveMyBubbleColor => myBubbleColor
+      .withValues(alpha: (myBubbleColor.a * myBubbleOpacity).clamp(0.0, 1.0));
+
+  Color get effectiveAiBubbleColor => aiBubbleColor
+      .withValues(alpha: (aiBubbleColor.a * aiBubbleOpacity).clamp(0.0, 1.0));
+
+  /// Best guess at the colour sitting behind the wallpaper image. We cannot
+  /// sample the image itself, so assume a middling grey biased by the theme.
+  Color get _wallpaperBaseColor {
+    if (wallpaperColorValue != null) return Color(wallpaperColorValue!);
+    if (wallpaperImagePath != null) {
+      return isDark ? const Color(0xFF333333) : const Color(0xFFBFBFBF);
+    }
+    return theme.chatBackground;
+  }
+
+  /// The colour a reader effectively sees behind bubble text on [isMe]'s side,
+  /// after the wallpaper, the tint layer and the (possibly translucent) bubble
+  /// are composited. Used to pick a legible text colour.
+  Color _behindBubbleText(bool isMe) {
+    var bg = _wallpaperBaseColor;
+    if (overlayOpacity > 0) {
+      bg = Color.alphaBlend(
+          overlayColor.withValues(alpha: overlayOpacity.clamp(0.0, 1.0)), bg);
+    }
+    final bubble = isMe ? effectiveMyBubbleColor : effectiveAiBubbleColor;
+    return Color.alphaBlend(bubble, bg);
+  }
+
+  /// Auto dark/light bubble text depending on what is behind it (requirement 一.3).
+  Color bubbleTextColorFor(bool isMe) =>
+      _behindBubbleText(isMe).computeLuminance() > 0.5
+          ? const Color(0xFF1A1A1A)
+          : const Color(0xFFF2F2F2);
+
+  /// When the bubble is very translucent, a faint outline keeps text readable
+  /// over an unknown wallpaper (requirement 一 / 五).
+  bool bubbleTextNeedsHalo(bool isMe) {
+    final a = (isMe ? effectiveMyBubbleColor : effectiveAiBubbleColor).a;
+    return a < 0.35;
+  }
+
+  /// Retained for callers that still want a plain theme-based colour.
+  Color get bubbleTextColor =>
+      isDark ? const Color(0xFFEDEDED) : Colors.black87;
+
+  // --- Input field (judged on its own background, requirement 四) --
+
+  Color get inputFieldColor =>
+      isDark ? const Color(0xFF2C2C2C) : Colors.white;
+
+  Color get inputTextColor => inputFieldColor.computeLuminance() > 0.5
+      ? const Color(0xFF1A1A1A)
+      : const Color(0xFFF2F2F2);
+
+  Color get inputCursorColor => const Color(0xFF07C160);
 
   // --- Loading ------------------------------------------------------
 
@@ -143,6 +217,14 @@ class AppSettings extends ChangeNotifier {
         .values[(p.getInt(_kTheme) ?? theme.index).clamp(0, 2)];
     sound = NotificationSound
         .values[(p.getInt(_kSound) ?? sound.index).clamp(0, 3)];
+    myBubbleOpacity =
+        (p.getDouble(_kMyBubbleOpacity) ?? myBubbleOpacity).clamp(0.0, 1.0);
+    aiBubbleOpacity =
+        (p.getDouble(_kAiBubbleOpacity) ?? aiBubbleOpacity).clamp(0.0, 1.0);
+    wallpaperBlur =
+        (p.getDouble(_kWallpaperBlur) ?? wallpaperBlur).clamp(0.0, 20.0);
+    overlayOpacity =
+        (p.getDouble(_kOverlayOpacity) ?? overlayOpacity).clamp(0.0, 1.0);
   }
 
   static Color _colorOr(int? v, Color fallback) =>
@@ -223,6 +305,33 @@ class AppSettings extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Slider setters notify on every drag tick for a live preview but only write
+  /// to disk when [save] is true (pass `false` on `onChanged`, `true` on
+  /// `onChangeEnd`).
+  Future<void> setMyBubbleOpacity(double v, {bool save = true}) async {
+    myBubbleOpacity = v.clamp(0.0, 1.0);
+    if (save) await _prefs.setDouble(_kMyBubbleOpacity, myBubbleOpacity);
+    notifyListeners();
+  }
+
+  Future<void> setAiBubbleOpacity(double v, {bool save = true}) async {
+    aiBubbleOpacity = v.clamp(0.0, 1.0);
+    if (save) await _prefs.setDouble(_kAiBubbleOpacity, aiBubbleOpacity);
+    notifyListeners();
+  }
+
+  Future<void> setWallpaperBlur(double v, {bool save = true}) async {
+    wallpaperBlur = v.clamp(0.0, 20.0);
+    if (save) await _prefs.setDouble(_kWallpaperBlur, wallpaperBlur);
+    notifyListeners();
+  }
+
+  Future<void> setOverlayOpacity(double v, {bool save = true}) async {
+    overlayOpacity = v.clamp(0.0, 1.0);
+    if (save) await _prefs.setDouble(_kOverlayOpacity, overlayOpacity);
+    notifyListeners();
+  }
+
   /// Applying a preset also resets the bubble colours and clears any custom
   /// wallpaper, so the preset looks the way it is meant to out of the box.
   Future<void> applyPreset(ThemePreset preset) async {
@@ -243,13 +352,17 @@ class AppSettings extends ChangeNotifier {
 
   static int _argb(Color c) => c.toARGB32();
 
-  /// Copy a picked image into app-support storage under a fresh, unique name
-  /// so FileImage's path-keyed cache always picks up the new file. Deletes the
-  /// previous copy if there was one.
+  /// Copy a picked image into the app documents directory (persistent, never a
+  /// temp dir — requirement 五) under a fresh, unique name so FileImage's
+  /// path-keyed cache always picks up the new file. Deletes the previous copy.
   static Future<String> _persistImage(
       String srcPath, String name, String? previous) async {
-    final dir = await getApplicationSupportDirectory();
-    final ext = srcPath.split('.').last.split('?').first;
+    final base = await getApplicationDocumentsDirectory();
+    final dir = Directory('${base.path}/media');
+    if (!dir.existsSync()) dir.createSync(recursive: true);
+    final ext = srcPath.contains('.')
+        ? srcPath.split('.').last.split('?').first
+        : 'jpg';
     final safeExt = (ext.length <= 4) ? ext : 'jpg';
     final dest =
         '${dir.path}/${name}_${DateTime.now().millisecondsSinceEpoch}.$safeExt';
