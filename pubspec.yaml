@@ -50,6 +50,10 @@ dependencies:
   # Share / save the exported chat log out of the app sandbox.
   share_plus: ^10.0.0
 
+  # Local persistence for conversations, messages and mood entries.
+  hive: ^2.2.3
+  hive_flutter: ^1.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

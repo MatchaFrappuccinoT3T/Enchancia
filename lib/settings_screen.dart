@@ -323,7 +323,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
             children: [
               _sectionHeader('个性化'),
               _navTile(
-                title: '聊天名称',
+                title: '新对话默认名称',
                 trailingText: _s.chatTitle,
                 onTap: _editTitle,
               ),
