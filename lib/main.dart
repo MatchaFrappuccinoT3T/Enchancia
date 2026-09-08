@@ -1,30 +1,59 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 
-void main() {
-  runApp(const EnchanciaApp());
+import 'settings.dart';
+import 'settings_screen.dart';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final settings = await AppSettings.load();
+  runApp(EnchanciaApp(settings: settings));
 }
 
 class EnchanciaApp extends StatelessWidget {
-  const EnchanciaApp({super.key});
+  final AppSettings settings;
+  const EnchanciaApp({super.key, required this.settings});
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: 'Enchancia',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFFFFC0CB),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-      ),
-      home: const ChatScreen(),
+    return ListenableBuilder(
+      listenable: settings,
+      builder: (context, _) {
+        final brightness =
+            settings.isDark ? Brightness.dark : Brightness.light;
+        return MaterialApp(
+          title: 'Enchancia',
+          debugShowCheckedModeBanner: false,
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: const Color(0xFFFFC0CB),
+              brightness: brightness,
+            ),
+            useMaterial3: true,
+            // Kill the pink Material-3 surface tint on menus / dialogs.
+            popupMenuTheme: PopupMenuThemeData(
+              color: settings.menuColor,
+              surfaceTintColor: Colors.transparent,
+              elevation: 3,
+              textStyle: TextStyle(
+                  color: settings.appBarTextColor, fontSize: 14),
+            ),
+            dialogTheme: DialogThemeData(
+              backgroundColor: settings.menuColor,
+              surfaceTintColor: Colors.transparent,
+            ),
+          ),
+          home: ChatScreen(settings: settings),
+        );
+      },
     );
   }
 }
@@ -35,12 +64,25 @@ class ChatMessage {
   final bool isMe;
   final DateTime time;
 
+  /// Arbitrary metadata carried with the message. For messages the user sends
+  /// this includes `timestamp` (ISO 8601) so the backend can tell the model
+  /// what the current time is (requirement 一.7).
+  final Map<String, dynamic> metadata;
+
   ChatMessage({
     this.text,
     this.image,
     required this.isMe,
     required this.time,
-  });
+    Map<String, dynamic>? metadata,
+  }) : metadata = metadata ?? const {};
+
+  /// Standard metadata block stamped onto every outgoing user message.
+  static Map<String, dynamic> outgoingMeta(DateTime now) => {
+        'timestamp': now.toIso8601String(),
+        'timezone': now.timeZoneName,
+        'timezoneOffsetMinutes': now.timeZoneOffset.inMinutes,
+      };
 }
 
 const List<String> _placeholderReplies = [
@@ -61,6 +103,24 @@ const List<String> _commonEmojis = [
   '👏', '💪', '🤝', '✌️', '🤟', '👋', '❤️', '💔',
   '💕', '💖', '✨', '🌟', '🔥', '🎉', '🌸', '🍺',
 ];
+
+/// Show a time separator when the gap since the previous message is at least
+/// this long (requirement 一.5).
+const Duration _timeSeparatorGap = Duration(minutes: 5);
+
+String _formatClock(DateTime dt) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
+}
+
+/// "x月x日 下午xx:xx" (requirement 一.5).
+String _formatSeparator(DateTime dt) {
+  final period = dt.hour < 12 ? '上午' : '下午';
+  var h12 = dt.hour % 12;
+  if (h12 == 0) h12 = 12;
+  String two(int n) => n.toString().padLeft(2, '0');
+  return '${dt.month}月${dt.day}日 $period${two(h12)}:${two(dt.minute)}';
+}
 
 class _BubbleTailPainter extends CustomPainter {
   final Color color;
@@ -94,7 +154,8 @@ class _BubbleTailPainter extends CustomPainter {
 }
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key});
+  final AppSettings settings;
+  const ChatScreen({super.key, required this.settings});
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -107,9 +168,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final List<ChatMessage> _messages = [];
   final Random _random = Random();
   final ImagePicker _picker = ImagePicker();
+  final AudioPlayer _player = AudioPlayer();
 
-  File? _myAvatar;
   _Panel _panel = _Panel.none;
+
+  AppSettings get _s => widget.settings;
 
   @override
   void initState() {
@@ -128,7 +191,17 @@ class _ChatScreenState extends State<ChatScreen> {
     _controller.dispose();
     _scrollController.dispose();
     _focusNode.dispose();
+    _player.dispose();
     super.dispose();
+  }
+
+  Future<void> _playNotificationSound() async {
+    final asset = _s.sound.asset;
+    if (asset == null) return;
+    try {
+      await _player.stop();
+      await _player.play(AssetSource(asset));
+    } catch (_) {/* sound is non-critical */}
   }
 
   void _scrollToBottom() {
@@ -147,15 +220,43 @@ class _ChatScreenState extends State<ChatScreen> {
     final text = _controller.text.trim();
     if (text.isEmpty) return;
 
-    setState(() {
-      _messages.add(ChatMessage(
-        text: text,
-        isMe: true,
-        time: DateTime.now(),
-      ));
-    });
+    final now = DateTime.now();
+    final msg = ChatMessage(
+      text: text,
+      isMe: true,
+      time: now,
+      metadata: ChatMessage.outgoingMeta(now),
+    );
+    setState(() => _messages.add(msg));
     _controller.clear();
     _scrollToBottom();
+    _sendToBackend(msg);
+  }
+
+  /// Payload posted to the chat backend. `metadata.timestamp` is an ISO 8601
+  /// string of the moment the user sent the message, so the model can answer
+  /// time-aware questions (requirement 一.7).
+  Map<String, dynamic> _buildPayload(ChatMessage msg) {
+    return {
+      'role': 'user',
+      'content': msg.text,
+      if (msg.image != null) 'attachmentType': 'image',
+      'metadata': {
+        ...msg.metadata,
+        'clientSentAt': DateTime.now().toIso8601String(),
+      },
+    };
+  }
+
+  /// Integration point for the real backend. Currently it only logs the
+  /// payload and falls back to a canned reply.
+  Future<void> _sendToBackend(ChatMessage msg) async {
+    final payload = _buildPayload(msg);
+    debugPrint('chat payload -> ${jsonEncode(payload)}');
+    // TODO: replace with a real request, e.g.
+    //   await http.post(Uri.parse(kChatEndpoint),
+    //       headers: {'content-type': 'application/json'},
+    //       body: jsonEncode(payload));
     _replyLater();
   }
 
@@ -170,6 +271,7 @@ class _ChatScreenState extends State<ChatScreen> {
         ));
       });
       _scrollToBottom();
+      _playNotificationSound();
     });
   }
 
@@ -206,7 +308,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // --- Image picking ----------------------------------------------------
 
-  Future<void> _pickAvatar() async {
+  Future<void> _pickAvatar(bool isMe) async {
     try {
       final XFile? file = await _picker.pickImage(
         source: ImageSource.gallery,
@@ -214,7 +316,11 @@ class _ChatScreenState extends State<ChatScreen> {
         imageQuality: 90,
       );
       if (file == null) return;
-      setState(() => _myAvatar = File(file.path));
+      if (isMe) {
+        await _s.setMyAvatar(file.path);
+      } else {
+        await _s.setAiAvatar(file.path);
+      }
     } catch (e) {
       _showError('无法读取图片：$e');
     }
@@ -229,15 +335,16 @@ class _ChatScreenState extends State<ChatScreen> {
         imageQuality: 85,
       );
       if (file == null) return;
-      setState(() {
-        _messages.add(ChatMessage(
-          image: File(file.path),
-          isMe: true,
-          time: DateTime.now(),
-        ));
-      });
+      final now = DateTime.now();
+      final msg = ChatMessage(
+        image: File(file.path),
+        isMe: true,
+        time: now,
+        metadata: ChatMessage.outgoingMeta(now),
+      );
+      setState(() => _messages.add(msg));
       _scrollToBottom();
-      _replyLater();
+      _sendToBackend(msg);
     } catch (e) {
       _showError('无法打开：$e');
     }
@@ -248,6 +355,46 @@ class _ChatScreenState extends State<ChatScreen> {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
     );
+  }
+
+  // --- Export chat log (requirement 二.9) ---------------------------
+
+  static String _stampFull(DateTime dt) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${dt.year}-${two(dt.month)}-${two(dt.day)} '
+        '${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
+  }
+
+  Future<void> _exportChatLog() async {
+    if (_messages.isEmpty) {
+      _showError('还没有聊天记录');
+      return;
+    }
+    final buf = StringBuffer()
+      ..writeln('${_s.chatTitle} 聊天记录')
+      ..writeln('导出时间：${_stampFull(DateTime.now())}')
+      ..writeln('共 ${_messages.length} 条')
+      ..writeln('=' * 32);
+    for (final m in _messages) {
+      final who = m.isMe ? '我' : _s.chatTitle;
+      final body = m.image != null ? '[图片] ${m.image!.path}' : (m.text ?? '');
+      buf.writeln('[${_stampFull(m.time)}] $who：$body');
+    }
+
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final now = DateTime.now();
+      String two(int n) => n.toString().padLeft(2, '0');
+      final name = 'chat_export_${now.year}${two(now.month)}${two(now.day)}'
+          '_${two(now.hour)}${two(now.minute)}${two(now.second)}.txt';
+      final file = File('${dir.path}/$name');
+      await file.writeAsString(buf.toString());
+      if (!mounted) return;
+      await Share.shareXFiles([XFile(file.path)], text: '聊天记录导出');
+      _showError('已导出到：${file.path}');
+    } catch (e) {
+      _showError('导出失败：$e');
+    }
   }
 
   // --- Long-press copy menu -------------------------------------------
@@ -263,6 +410,7 @@ class _ChatScreenState extends State<ChatScreen> {
         Offset.zero & overlay.size,
       ),
       color: Colors.black87,
+      surfaceTintColor: Colors.transparent,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       items: [
         const PopupMenuItem<String>(
@@ -306,8 +454,15 @@ class _ChatScreenState extends State<ChatScreen> {
       case 'search':
         _onSearch();
         break;
-      case 'mute':
       case 'settings':
+        Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => SettingsScreen(
+            settings: _s,
+            onExportChat: _exportChatLog,
+          ),
+        ));
+        break;
+      case 'mute':
         _showError('功能暂未实现');
         break;
     }
@@ -316,23 +471,24 @@ class _ChatScreenState extends State<ChatScreen> {
   // --- Avatars / bubbles --------------------------------------------
 
   Widget _buildAvatar(bool isMe) {
+    final path = isMe ? _s.myAvatarPath : _s.aiAvatarPath;
     Widget inner;
-    if (isMe && _myAvatar != null) {
-      inner = Image.file(_myAvatar!, width: 40, height: 40, fit: BoxFit.cover);
+    if (path != null) {
+      inner = Image.file(File(path), width: 44, height: 44, fit: BoxFit.cover);
     } else {
       inner = Container(
-        width: 40,
-        height: 40,
+        width: 44,
+        height: 44,
         color: isMe ? const Color(0xFFB0E0E6) : const Color(0xFFE0D0D0),
         alignment: Alignment.center,
         child: Text(
           isMe ? '辰' : '哥',
-          style: const TextStyle(fontSize: 15, color: Colors.black87),
+          style: const TextStyle(fontSize: 16, color: Colors.black87),
         ),
       );
     }
     return GestureDetector(
-      onTap: isMe ? _pickAvatar : null,
+      onTap: () => _pickAvatar(isMe),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(6),
         child: inner,
@@ -340,9 +496,25 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
+  Widget _buildAvatarColumn(ChatMessage msg) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _buildAvatar(msg.isMe),
+        const SizedBox(height: 3),
+        Text(
+          _formatClock(msg.time),
+          style: TextStyle(
+            fontSize: 9,
+            color: _s.isDark ? Colors.white38 : Colors.black38,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildMessageContent(BuildContext context, ChatMessage msg) {
-    final bubbleColor =
-        msg.isMe ? const Color(0xFFFBF0F5) : Colors.white;
+    final bubbleColor = msg.isMe ? _s.myBubbleColor : _s.aiBubbleColor;
     final bool isImage = msg.image != null;
 
     Widget inner;
@@ -357,7 +529,11 @@ class _ChatScreenState extends State<ChatScreen> {
     } else {
       inner = Text(
         msg.text ?? '',
-        style: const TextStyle(fontSize: 15, color: Colors.black, height: 1.3),
+        style: TextStyle(
+          fontSize: _s.messageFontSize,
+          color: _s.bubbleTextColor,
+          height: 1.3,
+        ),
       );
     }
 
@@ -369,7 +545,7 @@ class _ChatScreenState extends State<ChatScreen> {
       child: Container(
         padding: isImage
             ? const EdgeInsets.all(3)
-            : const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+            : const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         decoration: BoxDecoration(
           color: bubbleColor,
           borderRadius: BorderRadius.circular(8),
@@ -379,7 +555,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
 
     final tail = Padding(
-      padding: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.only(top: 12),
       child: CustomPaint(
         size: const Size(6, 11),
         painter: _BubbleTailPainter(color: bubbleColor, pointLeft: !msg.isMe),
@@ -396,8 +572,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Widget _buildMessageRow(BuildContext context, ChatMessage msg) {
-    final maxBubbleWidth = MediaQuery.of(context).size.width * 0.68;
-    final avatar = _buildAvatar(msg.isMe);
+    final maxBubbleWidth = MediaQuery.of(context).size.width * 0.66;
+    final avatarColumn = _buildAvatarColumn(msg);
     final content = Flexible(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: maxBubbleWidth),
@@ -412,13 +588,39 @@ class _ChatScreenState extends State<ChatScreen> {
             msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: msg.isMe
-            ? [content, const SizedBox(width: 6), avatar]
-            : [avatar, const SizedBox(width: 6), content],
+            ? [content, const SizedBox(width: 6), avatarColumn]
+            : [avatarColumn, const SizedBox(width: 6), content],
+      ),
+    );
+  }
+
+  Widget _buildTimeSeparator(DateTime dt) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8, bottom: 4),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+          decoration: BoxDecoration(
+            color: _s.isDark
+                ? Colors.white.withValues(alpha: 0.12)
+                : Colors.black.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Text(
+            _formatSeparator(dt),
+            style: TextStyle(
+              fontSize: 12,
+              color: _s.isDark ? Colors.white70 : Colors.black54,
+            ),
+          ),
+        ),
       ),
     );
   }
 
   // --- Input bar ----------------------------------------------------
+
+  Color get _iconColor => _s.isDark ? Colors.white60 : Colors.black54;
 
   Widget _iconBtn(IconData icon, VoidCallback onTap) {
     return InkResponse(
@@ -426,7 +628,7 @@ class _ChatScreenState extends State<ChatScreen> {
       radius: 24,
       child: Padding(
         padding: const EdgeInsets.all(6),
-        child: Icon(icon, size: 28, color: Colors.black54),
+        child: Icon(icon, size: 28, color: _iconColor),
       ),
     );
   }
@@ -453,9 +655,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final hasText = _controller.text.trim().isNotEmpty;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
-      decoration: const BoxDecoration(
-        color: Color(0xFFF7F7F7),
-        border: Border(top: BorderSide(color: Color(0xFFE0E0E0), width: 0.5)),
+      decoration: BoxDecoration(
+        color: _s.panelColor,
+        border: Border(
+          top: BorderSide(
+            color: _s.isDark ? const Color(0xFF333333) : const Color(0xFFE0E0E0),
+            width: 0.5,
+          ),
+        ),
       ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.end,
@@ -469,7 +676,7 @@ class _ChatScreenState extends State<ChatScreen> {
               padding:
                   const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
               decoration: BoxDecoration(
-                color: Colors.white,
+                color: _s.isDark ? const Color(0xFF2C2C2C) : Colors.white,
                 borderRadius: BorderRadius.circular(5),
               ),
               child: TextField(
@@ -480,7 +687,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 keyboardType: TextInputType.multiline,
                 textInputAction: TextInputAction.newline,
                 cursorColor: const Color(0xFF07C160),
-                style: const TextStyle(fontSize: 16, color: Colors.black),
+                style: TextStyle(fontSize: 16, color: _s.bubbleTextColor),
                 decoration: const InputDecoration(
                   border: InputBorder.none,
                   isCollapsed: true,
@@ -509,7 +716,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget _buildEmojiPanel() {
     return Container(
       height: 240,
-      color: const Color(0xFFF7F7F7),
+      color: _s.panelColor,
       child: GridView.count(
         crossAxisCount: 8,
         padding: const EdgeInsets.all(8),
@@ -536,14 +743,15 @@ class _ChatScreenState extends State<ChatScreen> {
             width: 60,
             height: 60,
             decoration: BoxDecoration(
-              color: Colors.white,
+              color: _s.menuColor,
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Icon(icon, size: 30, color: Colors.black54),
+            child: Icon(icon, size: 30, color: _iconColor),
           ),
         ),
         const SizedBox(height: 6),
-        Text(label, style: const TextStyle(fontSize: 12, color: Colors.black54)),
+        Text(label,
+            style: TextStyle(fontSize: 12, color: _iconColor)),
       ],
     );
   }
@@ -552,7 +760,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return Container(
       height: 200,
       width: double.infinity,
-      color: const Color(0xFFF7F7F7),
+      color: _s.panelColor,
       padding: const EdgeInsets.all(20),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -572,7 +780,7 @@ class _ChatScreenState extends State<ChatScreen> {
       clipBehavior: Clip.none,
       children: [
         IconButton(
-          icon: const Icon(Icons.arrow_back, color: Colors.black87),
+          icon: Icon(Icons.arrow_back, color: _s.appBarTextColor),
           onPressed: _onBack,
         ),
         Positioned(
@@ -598,35 +806,45 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final wallpaper = _s.wallpaperImagePath;
     return Scaffold(
-      backgroundColor: const Color(0xFFEDEDED),
+      backgroundColor: _s.chatBackgroundColor,
       appBar: PreferredSize(
         preferredSize: const Size.fromHeight(kToolbarHeight),
         child: Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
+          decoration: BoxDecoration(
+            color: _s.appBarColor,
             border: Border(
-                bottom: BorderSide(color: Color(0xFFE0E0E0), width: 0.5)),
+              bottom: BorderSide(
+                color: _s.isDark
+                    ? const Color(0xFF333333)
+                    : const Color(0xFFE0E0E0),
+                width: 0.5,
+              ),
+            ),
           ),
           child: AppBar(
-            backgroundColor: Colors.white,
+            backgroundColor: _s.appBarColor,
             elevation: 0,
             leading: _buildBackButton(),
             centerTitle: true,
-            title: const Text(
-              '哥哥宝宝',
+            title: Text(
+              _s.chatTitle,
               style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.black),
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: _s.appBarTextColor,
+              ),
             ),
             actions: [
               IconButton(
-                icon: const Icon(Icons.search, color: Colors.black87),
+                icon: Icon(Icons.search, color: _s.appBarTextColor),
                 onPressed: _onSearch,
               ),
               PopupMenuButton<String>(
-                icon: const Icon(Icons.more_vert, color: Colors.black87),
+                icon: Icon(Icons.more_vert, color: _s.appBarTextColor),
+                color: _s.menuColor,
+                surfaceTintColor: Colors.transparent,
                 onSelected: _onMenuSelected,
                 itemBuilder: (context) => const [
                   PopupMenuItem(value: 'search', child: Text('搜索聊天记录')),
@@ -639,31 +857,51 @@ class _ChatScreenState extends State<ChatScreen> {
           ),
         ),
       ),
-      body: Column(
+      body: Stack(
         children: [
-          Expanded(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _dismissAll,
-              child: ListView.builder(
-                controller: _scrollController,
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: _messages.length,
-                itemBuilder: (context, index) =>
-                    _buildMessageRow(context, _messages[index]),
+          if (wallpaper != null)
+            Positioned.fill(
+              child: Image.file(File(wallpaper), fit: BoxFit.cover),
+            ),
+          Column(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: _dismissAll,
+                  child: ListView.builder(
+                    controller: _scrollController,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    itemCount: _messages.length,
+                    itemBuilder: (context, index) {
+                      final msg = _messages[index];
+                      final showTime = index == 0 ||
+                          msg.time
+                                  .difference(_messages[index - 1].time)
+                                  .abs() >=
+                              _timeSeparatorGap;
+                      return Column(
+                        children: [
+                          if (showTime) _buildTimeSeparator(msg.time),
+                          _buildMessageRow(context, msg),
+                        ],
+                      );
+                    },
+                  ),
+                ),
               ),
-            ),
-          ),
-          SafeArea(
-            top: false,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                _buildInputBar(),
-                if (_panel == _Panel.emoji) _buildEmojiPanel(),
-                if (_panel == _Panel.functions) _buildFunctionPanel(),
-              ],
-            ),
+              SafeArea(
+                top: false,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildInputBar(),
+                    if (_panel == _Panel.emoji) _buildEmojiPanel(),
+                    if (_panel == _Panel.functions) _buildFunctionPanel(),
+                  ],
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -674,7 +912,8 @@ class _ChatScreenState extends State<ChatScreen> {
 class _MessageSearchDelegate extends SearchDelegate<String> {
   final List<ChatMessage> messages;
 
-  _MessageSearchDelegate(this.messages) : super(searchFieldLabel: '搜索聊天记录');
+  _MessageSearchDelegate(this.messages)
+      : super(searchFieldLabel: '搜索聊天记录');
 
   @override
   List<Widget> buildActions(BuildContext context) => [
@@ -725,15 +964,10 @@ class _MessageSearchDelegate extends SearchDelegate<String> {
           leading: Icon(m.isMe ? Icons.person : Icons.face,
               color: Colors.black45),
           title: Text(m.text ?? ''),
-          subtitle: Text(_fmt(m.time)),
+          subtitle: Text(_formatClock(m.time)),
           onTap: () => close(context, m.text ?? ''),
         );
       },
     );
-  }
-
-  static String _fmt(DateTime dt) {
-    String two(int n) => n.toString().padLeft(2, '0');
-    return '${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
   }
 }

@@ -38,6 +38,18 @@ dependencies:
   # Pick images from the gallery or camera (custom avatar, send photos).
   image_picker: ^1.1.2
 
+  # Persist user settings across restarts.
+  shared_preferences: ^2.2.0
+
+  # Stable directories for exported files and copied avatar/wallpaper images.
+  path_provider: ^2.1.0
+
+  # Play the selected notification sound.
+  audioplayers: ^6.0.0
+
+  # Share / save the exported chat log out of the app sandbox.
+  share_plus: ^10.0.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
@@ -59,6 +71,9 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  assets:
+    - assets/sounds/
 
   # To add assets to your application, add an assets section, like this:
   # assets:
