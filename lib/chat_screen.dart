@@ -4,8 +4,6 @@ import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
 
-// `ui.ImageFilter` is used for the wallpaper Gaussian blur.
-
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,6 +11,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 
+import 'chat_widgets.dart';
 import 'image_viewer.dart';
 import 'models.dart';
 import 'mood_calendar_screen.dart';
@@ -79,6 +78,13 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  static const int _pageSize = 20;
+  static const int _initialWindow = 30;
+
+  /// Fraction of sends that fail, so the failed / tap-to-resend state is
+  /// visible without a real backend. Set to 0 to disable simulated failures.
+  static const double _failRate = 0.1;
+
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FocusNode _focusNode = FocusNode();
@@ -86,13 +92,30 @@ class _ChatScreenState extends State<ChatScreen> {
   final ImagePicker _picker = ImagePicker();
   final AudioPlayer _player = AudioPlayer();
   final Map<String, GlobalKey> _rowKeys = {};
+  final Set<String> _animatedIds = {};
+  final Set<String> _selectedIds = {};
 
   _Panel _panel = _Panel.none;
   String? _highlightId;
   Timer? _highlightTimer;
+  bool _multiSelect = false;
+  ChatMessage? _quoted;
+  bool _aiTyping = false;
+  int _visibleCount = 0;
+  bool _showJumpBtn = false;
+  int _unread = 0;
+  Offset? _lastDoubleTapPos;
 
   AppSettings get _s => widget.settings;
   List<ChatMessage> get _messages => widget.conversation.messages;
+
+  List<ChatMessage> get _visible {
+    final total = _messages.length;
+    final start = (total - _visibleCount).clamp(0, total);
+    return _messages.sublist(start);
+  }
+
+  bool get _allHistoryShown => _visibleCount >= _messages.length;
 
   @override
   void initState() {
@@ -103,6 +126,17 @@ class _ChatScreenState extends State<ChatScreen> {
         setState(() => _panel = _Panel.none);
       }
     });
+    // Repair any send that was interrupted by an app kill.
+    for (final m in _messages) {
+      if (m.isMe && m.status == MessageStatus.sending) {
+        m.status = MessageStatus.sent;
+      }
+    }
+    // History should not play the entry animation.
+    _animatedIds.addAll(_messages.map((m) => m.id));
+    _visibleCount =
+        _messages.length <= _initialWindow ? _messages.length : _initialWindow;
+    _scrollController.addListener(_onScroll);
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
 
@@ -117,6 +151,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _persist() => Store.saveConversation(widget.conversation);
+
+  void _appendMessage(ChatMessage m) {
+    _messages.add(m);
+    _visibleCount = (_visibleCount + 1).clamp(0, _messages.length);
+  }
 
   Future<void> _playNotificationSound() async {
     final asset = _s.sound.asset;
@@ -139,6 +178,15 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  void _onScroll() {
+    if (!mounted || !_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    final fromBottom = pos.maxScrollExtent - pos.pixels;
+    final show = fromBottom > MediaQuery.of(context).size.height;
+    if (show != _showJumpBtn) setState(() => _showJumpBtn = show);
+    if (fromBottom < 60 && _unread != 0) setState(() => _unread = 0);
+  }
+
   // --- Sending ------------------------------------------------------
 
   void _sendMessage() {
@@ -146,54 +194,95 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
 
     final now = DateTime.now();
+    final q = _quoted;
     final msg = ChatMessage(
       id: ChatMessage.newId(),
       text: text,
       isMe: true,
       time: now,
       metadata: ChatMessage.outgoingMeta(now),
+      status: MessageStatus.sending,
+      quotedSummary: q?.summary,
+      quotedMessageId: q?.id,
     );
-    setState(() => _messages.add(msg));
+    setState(() {
+      _appendMessage(msg);
+      _quoted = null;
+    });
     _persist();
     _controller.clear();
     _scrollToBottom();
-    _sendToBackend(msg);
+    _dispatch(msg);
   }
 
-  /// Payload posted to the chat backend. `metadata.timestamp` (ISO 8601) lets
-  /// the model answer time-aware questions (requirement 一.7).
   Map<String, dynamic> _buildPayload(ChatMessage msg) => {
         'role': 'user',
         'content': msg.text,
         if (msg.kind != MessageKind.text) 'attachmentType': msg.kind.name,
+        if (msg.quotedMessageId != null) 'quoteOf': msg.quotedMessageId,
         'metadata': {
           ...msg.metadata,
           'clientSentAt': DateTime.now().toIso8601String(),
         },
       };
 
-  Future<void> _sendToBackend(ChatMessage msg) async {
+  /// sending -> (sent | failed); on success the AI "types" then replies, and
+  /// the delivered user messages flip to `read` (requirement 三 / 四).
+  Future<void> _dispatch(ChatMessage msg) async {
+    _setTyping(true);
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (!mounted) return;
+
+    final failed = _random.nextDouble() < _failRate;
+    setState(() => msg.status =
+        failed ? MessageStatus.failed : MessageStatus.sent);
+    _persist();
+    if (failed) {
+      _setTyping(false);
+      return;
+    }
+
     debugPrint('chat payload -> ${jsonEncode(_buildPayload(msg))}');
-    // TODO: replace with a real request to the chat backend.
-    _replyLater();
+    await Future.delayed(const Duration(milliseconds: 800));
+    if (!mounted) return;
+    _addAiReply();
   }
 
-  void _replyLater() {
-    Future.delayed(const Duration(seconds: 1), () {
-      if (!mounted) return;
-      setState(() {
-        _messages.add(ChatMessage(
-          id: ChatMessage.newId(),
-          text:
-              _placeholderReplies[_random.nextInt(_placeholderReplies.length)],
-          isMe: false,
-          time: DateTime.now(),
-        ));
-      });
-      _persist();
-      _scrollToBottom();
-      _playNotificationSound();
+  void _setTyping(bool v) {
+    if (_aiTyping == v) return;
+    setState(() => _aiTyping = v);
+    if (v) _scrollToBottom();
+  }
+
+  void _addAiReply() {
+    final reply = ChatMessage(
+      id: ChatMessage.newId(),
+      text: _placeholderReplies[_random.nextInt(_placeholderReplies.length)],
+      isMe: false,
+      time: DateTime.now(),
+    );
+    setState(() {
+      _appendMessage(reply);
+      _aiTyping = false;
+      for (final m in _messages) {
+        if (m.isMe && m.status == MessageStatus.sent) {
+          m.status = MessageStatus.read;
+        }
+      }
     });
+    _persist();
+    _playNotificationSound();
+    if (_showJumpBtn) {
+      setState(() => _unread += 1);
+    } else {
+      _scrollToBottom();
+    }
+  }
+
+  void _resend(ChatMessage msg) {
+    setState(() => msg.status = MessageStatus.sending);
+    _persist();
+    _dispatch(msg);
   }
 
   // --- Panels -----------------------------------------------------
@@ -268,17 +357,22 @@ class _ChatScreenState extends State<ChatScreen> {
         isMe: true,
         time: now,
         metadata: ChatMessage.outgoingMeta(now),
+        status: MessageStatus.sending,
       );
-      setState(() => _messages.add(msg));
+      setState(() => _appendMessage(msg));
       _persist();
       _scrollToBottom();
-      _sendToBackend(msg);
+      _dispatch(msg);
     } catch (e) {
       _showSnack('无法打开：$e');
     }
   }
 
   void _openImage(ChatMessage msg) {
+    if (_multiSelect) {
+      _toggleSelect(msg);
+      return;
+    }
     if (msg.mediaPath == null) return;
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => ImageViewerScreen(path: msg.mediaPath!, heroTag: msg.id),
@@ -292,49 +386,157 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  // --- Long-press message menu (requirement 四.1) --------------
+  // --- Long-press menu (requirement 一) -----------------------
 
-  Future<void> _showMessageMenu(
-      BuildContext context, Offset position, ChatMessage msg) async {
-    final overlay =
-        Overlay.of(context).context.findRenderObject() as RenderBox;
-    PopupMenuItem<String> item(String v, String label) => PopupMenuItem<String>(
-          value: v,
-          height: 40,
-          child: Text(label,
-              style: const TextStyle(color: Colors.white, fontSize: 14)),
-        );
-
-    final selected = await showMenu<String>(
-      context: context,
-      color: Colors.black87,
-      surfaceTintColor: Colors.transparent,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-      position: RelativeRect.fromRect(
-        Rect.fromLTWH(position.dx, position.dy, 0, 0),
-        Offset.zero & overlay.size,
-      ),
-      items: [
-        if (msg.kind == MessageKind.text) item('copy', '复制'),
-        item('favorite', msg.favorite ? '取消收藏' : '收藏'),
-        item('delete', '删除'),
-      ],
-    );
-
-    switch (selected) {
-      case 'copy':
-        await Clipboard.setData(ClipboardData(text: msg.text ?? ''));
+  Future<void> _onLongPressMessage(Offset pos, ChatMessage msg) async {
+    if (_multiSelect) return;
+    final action =
+        await showMessageMenu(context, anchor: pos, isFavorite: msg.favorite);
+    if (!mounted || action == null) return;
+    switch (action) {
+      case MsgMenu.copy:
+        await Clipboard.setData(
+            ClipboardData(text: msg.text ?? msg.summary));
         _showSnack('已复制');
         break;
-      case 'favorite':
+      case MsgMenu.favorite:
         setState(() => msg.favorite = !msg.favorite);
         _persist();
         break;
-      case 'delete':
-        setState(() => _messages.removeWhere((m) => m.id == msg.id));
+      case MsgMenu.delete:
+        setState(() {
+          _messages.removeWhere((m) => m.id == msg.id);
+          _visibleCount = _visibleCount.clamp(0, _messages.length);
+        });
         _persist();
         break;
+      case MsgMenu.multi:
+        setState(() {
+          _multiSelect = true;
+          _selectedIds
+            ..clear()
+            ..add(msg.id);
+        });
+        break;
+      case MsgMenu.quote:
+        setState(() => _quoted = msg);
+        _focusNode.requestFocus();
+        break;
+      case MsgMenu.forward:
+      case MsgMenu.remind:
+      case MsgMenu.search:
+        _showSnack('功能开发中');
+        break;
     }
+  }
+
+  // --- Multi-select ------------------------------------------
+
+  void _toggleSelect(ChatMessage msg) {
+    setState(() {
+      if (!_selectedIds.add(msg.id)) _selectedIds.remove(msg.id);
+      if (_selectedIds.isEmpty) _multiSelect = false;
+    });
+  }
+
+  void _exitMultiSelect() {
+    setState(() {
+      _multiSelect = false;
+      _selectedIds.clear();
+    });
+  }
+
+  void _deleteSelected() {
+    setState(() {
+      _messages.removeWhere((m) => _selectedIds.contains(m.id));
+      _visibleCount = _visibleCount.clamp(0, _messages.length);
+      _multiSelect = false;
+      _selectedIds.clear();
+    });
+    _persist();
+  }
+
+  // --- Double-tap like (requirement 六) ---------------------
+
+  void _handleDoubleTap(ChatMessage msg) {
+    if (_multiSelect) return;
+    final wasLiked = msg.liked;
+    setState(() => msg.liked = !msg.liked);
+    _persist();
+    if (!wasLiked && _lastDoubleTapPos != null) {
+      _spawnHeart(_lastDoubleTapPos!);
+    }
+  }
+
+  void _spawnHeart(Offset globalPos) {
+    final overlayState = Overlay.of(context);
+    late OverlayEntry entry;
+    entry = OverlayEntry(
+      builder: (_) => Positioned(
+        left: globalPos.dx - 15,
+        top: globalPos.dy - 44,
+        child: IgnorePointer(
+          child: FloatingHeart(onDone: () => entry.remove()),
+        ),
+      ),
+    );
+    overlayState.insert(entry);
+  }
+
+  // --- Jump / highlight ------------------------------------
+
+  void _highlightAndScroll(String id) {
+    final idx = _messages.indexWhere((m) => m.id == id);
+    if (idx < 0) return;
+    final needed = _messages.length - idx;
+    setState(() {
+      if (needed > _visibleCount) _visibleCount = _messages.length;
+      _highlightId = id;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final ctx = _rowKeys[id]?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(ctx,
+            alignment: 0.2, duration: const Duration(milliseconds: 350));
+      } else if (_scrollController.hasClients) {
+        final total = _messages.length;
+        final max = _scrollController.position.maxScrollExtent;
+        _scrollController.jumpTo((idx / total * max).clamp(0.0, max));
+      }
+    });
+    _highlightTimer?.cancel();
+    _highlightTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _highlightId = null);
+    });
+  }
+
+  void _jumpToDate(DateTime day) {
+    final key = dateKey(day);
+    final idx = _messages.indexWhere((m) => dateKey(m.time) == key);
+    if (idx < 0) {
+      _showSnack('那天没有聊天记录');
+      return;
+    }
+    _highlightAndScroll(_messages[idx].id);
+  }
+
+  void _jumpToQuoted(String? id) {
+    if (id == null) return;
+    if (_messages.indexWhere((m) => m.id == id) < 0) {
+      _showSnack('原消息已删除');
+      return;
+    }
+    _highlightAndScroll(id);
+  }
+
+  // --- Pull to refresh: older history (requirement 七) -----
+
+  Future<void> _loadMoreHistory() async {
+    if (_allHistoryShown) return;
+    await Future.delayed(const Duration(milliseconds: 600));
+    if (!mounted) return;
+    setState(() => _visibleCount =
+        (_visibleCount + _pageSize).clamp(0, _messages.length));
   }
 
   // --- Top bar ---------------------------------------------------
@@ -349,35 +551,8 @@ class _ChatScreenState extends State<ChatScreen> {
     if (picked != null && mounted) _jumpToDate(picked);
   }
 
-  void _jumpToDate(DateTime day) {
-    final key = dateKey(day);
-    final idx = _messages.indexWhere((m) => dateKey(m.time) == key);
-    if (idx < 0) {
-      _showSnack('那天没有聊天记录');
-      return;
-    }
-    final count = _messages.length;
-    if (_scrollController.hasClients && count > 0) {
-      final max = _scrollController.position.maxScrollExtent;
-      _scrollController.jumpTo((idx / count * max).clamp(0.0, max));
-    }
-    setState(() => _highlightId = _messages[idx].id);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      final ctx = _rowKeys[_messages[idx].id]?.currentContext;
-      if (ctx != null) {
-        Scrollable.ensureVisible(ctx,
-            alignment: 0.15, duration: const Duration(milliseconds: 350));
-      }
-    });
-    _highlightTimer?.cancel();
-    _highlightTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _highlightId = null);
-    });
-  }
-
   Future<void> _renameConversation() async {
-    final controller =
-        TextEditingController(text: widget.conversation.name);
+    final controller = TextEditingController(text: widget.conversation.name);
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -418,7 +593,10 @@ class _ChatScreenState extends State<ChatScreen> {
         ));
         break;
       case 'clear':
-        setState(_messages.clear);
+        setState(() {
+          _messages.clear();
+          _visibleCount = 0;
+        });
         _persist();
         break;
       case 'settings':
@@ -430,7 +608,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  // --- Export (requirement 二.9) ------------------------------
+  // --- Export (requirement 二.9 from earlier round) ---------
 
   Future<void> _exportChatLog() async {
     if (_messages.isEmpty) {
@@ -492,10 +670,43 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
     return GestureDetector(
-      onTap: () => _pickAvatar(isMe),
+      onTap: _multiSelect ? null : () => _pickAvatar(isMe),
       child: ClipRRect(
           borderRadius: BorderRadius.circular(6), child: inner),
     );
+  }
+
+  Widget _statusIndicator(ChatMessage msg) {
+    if (!msg.isMe) {
+      return Text(
+        formatClock(msg.time),
+        style: TextStyle(
+            fontSize: 9,
+            color: _s.isDark ? Colors.white38 : Colors.black38),
+      );
+    }
+    return switch (msg.status) {
+      MessageStatus.sending => const SizedBox(
+          width: 11,
+          height: 11,
+          child: CircularProgressIndicator(strokeWidth: 1.6),
+        ),
+      MessageStatus.failed => GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: () => _resend(msg),
+          child: const Icon(Icons.error, size: 14, color: Color(0xFFE53935)),
+        ),
+      MessageStatus.sent || MessageStatus.read => AnimatedDefaultTextStyle(
+          duration: const Duration(milliseconds: 300),
+          style: TextStyle(
+            fontSize: 9,
+            color: msg.status == MessageStatus.read
+                ? const Color(0xFFB0B0B0)
+                : const Color(0xFFE8A0BF),
+          ),
+          child: Text(formatClock(msg.time)),
+        ),
+    };
   }
 
   Widget _buildAvatarColumn(ChatMessage msg) {
@@ -504,13 +715,7 @@ class _ChatScreenState extends State<ChatScreen> {
       children: [
         _buildAvatar(msg.isMe),
         const SizedBox(height: 3),
-        Text(
-          formatClock(msg.time),
-          style: TextStyle(
-            fontSize: 9,
-            color: _s.isDark ? Colors.white38 : Colors.black38,
-          ),
-        ),
+        SizedBox(height: 14, child: Center(child: _statusIndicator(msg))),
       ],
     );
   }
@@ -519,10 +724,11 @@ class _ChatScreenState extends State<ChatScreen> {
     final bubbleColor =
         msg.isMe ? _s.effectiveMyBubbleColor : _s.effectiveAiBubbleColor;
     final isImage = msg.kind == MessageKind.image;
+    final textColor = _s.bubbleTextColorFor(msg.isMe);
 
-    Widget inner;
+    Widget body;
     if (isImage && msg.mediaPath != null) {
-      inner = GestureDetector(
+      body = GestureDetector(
         onTap: () => _openImage(msg),
         child: Hero(
           tag: msg.id,
@@ -537,9 +743,8 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
       );
     } else {
-      final textColor = _s.bubbleTextColorFor(msg.isMe);
       final halo = _s.bubbleTextNeedsHalo(msg.isMe);
-      inner = Text(
+      body = Text(
         msg.text ?? '',
         style: TextStyle(
           fontSize: _s.messageFontSize,
@@ -560,8 +765,46 @@ class _ChatScreenState extends State<ChatScreen> {
       );
     }
 
-    final bubble = GestureDetector(
-      onLongPressStart: (d) => _showMessageMenu(context, d.globalPosition, msg),
+    Widget inner = body;
+    if (msg.quotedSummary != null) {
+      inner = Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment:
+            msg.isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          GestureDetector(
+            onTap: () => _jumpToQuoted(msg.quotedMessageId),
+            child: Container(
+              margin: const EdgeInsets.only(bottom: 6),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.06),
+                borderRadius: BorderRadius.circular(4),
+                border: Border(
+                  left: BorderSide(
+                      color: textColor.withValues(alpha: 0.4), width: 2),
+                ),
+              ),
+              child: Text(
+                msg.quotedSummary!,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12,
+                    color: textColor.withValues(alpha: 0.72)),
+              ),
+            ),
+          ),
+          body,
+        ],
+      );
+    }
+
+    final bubbleBox = GestureDetector(
+      onLongPressStart: (d) => _onLongPressMessage(d.globalPosition, msg),
+      onDoubleTapDown: (d) => _lastDoubleTapPos = d.globalPosition,
+      onDoubleTap: () => _handleDoubleTap(msg),
       child: Container(
         padding: isImage
             ? const EdgeInsets.all(3)
@@ -572,6 +815,27 @@ class _ChatScreenState extends State<ChatScreen> {
         ),
         child: inner,
       ),
+    );
+
+    final bubbleWithHeart = Stack(
+      clipBehavior: Clip.none,
+      children: [
+        bubbleBox,
+        if (msg.liked)
+          Positioned(
+            right: -3,
+            bottom: -5,
+            child: Container(
+              padding: const EdgeInsets.all(2),
+              decoration: BoxDecoration(
+                color: _s.chatBackgroundColor,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.favorite,
+                  size: 12, color: Color(0xFFE8577D)),
+            ),
+          ),
+      ],
     );
 
     final tail = Padding(
@@ -593,13 +857,13 @@ class _ChatScreenState extends State<ChatScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: msg.isMe
-          ? [star, Flexible(child: bubble), tail]
-          : [tail, Flexible(child: bubble), star],
+          ? [star, Flexible(child: bubbleWithHeart), tail]
+          : [tail, Flexible(child: bubbleWithHeart), star],
     );
   }
 
   Widget _buildMessageRow(ChatMessage msg) {
-    final maxBubbleWidth = MediaQuery.of(context).size.width * 0.66;
+    final maxBubbleWidth = MediaQuery.of(context).size.width * 0.62;
     final avatarColumn = _buildAvatarColumn(msg);
     final content = Flexible(
       child: ConstrainedBox(
@@ -608,19 +872,39 @@ class _ChatScreenState extends State<ChatScreen> {
       ),
     );
 
-    return Container(
-      key: _rowKeys.putIfAbsent(msg.id, () => GlobalKey()),
-      color: msg.id == _highlightId
-          ? const Color(0x33F5A623)
-          : Colors.transparent,
-      padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 8),
-      child: Row(
-        mainAxisAlignment:
-            msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: msg.isMe
-            ? [content, const SizedBox(width: 6), avatarColumn]
-            : [avatarColumn, const SizedBox(width: 6), content],
+    Widget row = Row(
+      mainAxisAlignment:
+          msg.isMe ? MainAxisAlignment.end : MainAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: msg.isMe
+          ? [content, const SizedBox(width: 6), avatarColumn]
+          : [avatarColumn, const SizedBox(width: 6), content],
+    );
+
+    if (_multiSelect) {
+      final selected = _selectedIds.contains(msg.id);
+      row = Row(
+        children: [
+          Icon(
+            selected ? Icons.check_circle : Icons.radio_button_unchecked,
+            size: 22,
+            color: selected ? const Color(0xFF07C160) : Colors.grey,
+          ),
+          const SizedBox(width: 6),
+          Expanded(child: row),
+        ],
+      );
+    }
+
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _multiSelect ? () => _toggleSelect(msg) : null,
+      child: Container(
+        color: msg.id == _highlightId
+            ? const Color(0x33F5A623)
+            : Colors.transparent,
+        padding: const EdgeInsets.symmetric(vertical: 5, horizontal: 8),
+        child: row,
       ),
     );
   }
@@ -645,6 +929,97 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _typingRow() {
+    final tc = _s.bubbleTextColorFor(false);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 4, 8, 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildAvatar(false),
+          const SizedBox(width: 6),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            decoration: BoxDecoration(
+              color: _s.effectiveAiBubbleColor,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('对方正在输入',
+                    style: TextStyle(fontSize: 13, color: tc)),
+                const SizedBox(width: 6),
+                TypingDots(color: tc),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // --- Message list ---------------------------------------
+
+  Widget _messageList() {
+    final vis = _visible;
+    // Only worth telling the user "没有更多了" once there was actually more.
+    final headerCount =
+        (_allHistoryShown && _messages.length > _initialWindow) ? 1 : 0;
+    final typingCount = _aiTyping ? 1 : 0;
+
+    return RefreshIndicator(
+      onRefresh: _loadMoreHistory,
+      child: ListView.builder(
+        controller: _scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        itemCount: headerCount + vis.length + typingCount,
+        itemBuilder: (context, index) {
+          if (headerCount == 1 && index == 0) {
+            return const Padding(
+              padding: EdgeInsets.symmetric(vertical: 10),
+              child: Center(
+                child: Text('没有更多了',
+                    style: TextStyle(color: Colors.grey, fontSize: 12)),
+              ),
+            );
+          }
+          final i = index - headerCount;
+          if (i == vis.length) return _typingRow();
+
+          final msg = vis[i];
+          final prev = i > 0 ? vis[i - 1] : null;
+          final showTime = prev == null ||
+              msg.time.difference(prev.time).abs() >= _timeSeparatorGap;
+
+          final animate = !_animatedIds.contains(msg.id);
+          if (animate) {
+            WidgetsBinding.instance
+                .addPostFrameCallback((_) => _animatedIds.add(msg.id));
+          }
+
+          final row = _buildMessageRow(msg);
+          return KeyedSubtree(
+            key: _rowKeys.putIfAbsent(msg.id, () => GlobalKey()),
+            child: Column(
+              children: [
+                if (showTime) _buildTimeSeparator(msg.time),
+                animate
+                    ? MessageEntry(
+                        key: ValueKey('entry_${msg.id}'),
+                        fromRight: msg.isMe,
+                        child: row,
+                      )
+                    : row,
+              ],
+            ),
+          );
+        },
       ),
     );
   }
@@ -678,6 +1053,36 @@ class _ChatScreenState extends State<ChatScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
         ),
         child: const Text('发送', style: TextStyle(fontSize: 15)),
+      ),
+    );
+  }
+
+  Widget _quoteBar() {
+    final q = _quoted!;
+    return Container(
+      width: double.infinity,
+      color: _s.panelColor,
+      padding: const EdgeInsets.fromLTRB(12, 8, 4, 0),
+      child: Row(
+        children: [
+          Container(width: 3, height: 28, color: const Color(0xFF07C160)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              '${q.isMe ? "我" : widget.conversation.name}：${q.summary}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  fontSize: 12,
+                  color: _s.inputTextColor.withValues(alpha: 0.7)),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.close, size: 18),
+            color: _iconColor,
+            onPressed: () => setState(() => _quoted = null),
+          ),
+        ],
       ),
     );
   }
@@ -716,8 +1121,6 @@ class _ChatScreenState extends State<ChatScreen> {
                 maxLines: 6,
                 keyboardType: TextInputType.multiline,
                 textInputAction: TextInputAction.newline,
-                // Judged on the input field's own background, not the global
-                // bubble text colour (requirement 四).
                 cursorColor: _s.inputCursorColor,
                 style: TextStyle(fontSize: 16, color: _s.inputTextColor),
                 decoration: InputDecoration(
@@ -808,9 +1211,7 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  /// Fixed layer under everything (requirement 二 / 三): base colour, wallpaper
-  /// image, a Gaussian blur via BackdropFilter, then an adjustable tint mask.
-  /// It never scrolls with the message list.
+  /// Fixed layer under everything (blur + tint mask). Never scrolls.
   Widget _wallpaperLayer() {
     final img = _s.wallpaperImagePath;
     final hasImage = img != null && File(img).existsSync();
@@ -839,62 +1240,165 @@ class _ChatScreenState extends State<ChatScreen> {
     );
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: _s.chatBackgroundColor,
-      appBar: PreferredSize(
-        preferredSize: const Size.fromHeight(kToolbarHeight),
-        child: Container(
-          decoration: BoxDecoration(
-            color: _s.appBarColor,
-            border: Border(
-              bottom: BorderSide(
-                color: _s.isDark
-                    ? const Color(0xFF333333)
-                    : const Color(0xFFE0E0E0),
-                width: 0.5,
-              ),
+  // --- App bars --------------------------------------------
+
+  PreferredSizeWidget _normalAppBar() {
+    return PreferredSize(
+      preferredSize: const Size.fromHeight(kToolbarHeight),
+      child: Container(
+        decoration: BoxDecoration(
+          color: _s.appBarColor,
+          border: Border(
+            bottom: BorderSide(
+              color: _s.isDark
+                  ? const Color(0xFF333333)
+                  : const Color(0xFFE0E0E0),
+              width: 0.5,
             ),
           ),
-          child: AppBar(
-            backgroundColor: _s.appBarColor,
-            elevation: 0,
-            leading: IconButton(
-              icon: Icon(Icons.arrow_back, color: _s.appBarTextColor),
-              onPressed: () => Navigator.of(context).maybePop(),
+        ),
+        child: AppBar(
+          backgroundColor: _s.appBarColor,
+          elevation: 0,
+          leading: IconButton(
+            icon: Icon(Icons.arrow_back, color: _s.appBarTextColor),
+            onPressed: () => Navigator.of(context).maybePop(),
+          ),
+          centerTitle: true,
+          title: Text(
+            widget.conversation.name,
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: _s.appBarTextColor,
             ),
-            centerTitle: true,
-            title: Text(
-              widget.conversation.name,
-              style: TextStyle(
-                fontSize: 16,
-                fontWeight: FontWeight.bold,
-                color: _s.appBarTextColor,
-              ),
+          ),
+          actions: [
+            IconButton(
+              icon: Icon(Icons.search, color: _s.appBarTextColor),
+              onPressed: _onSearch,
             ),
-            actions: [
-              IconButton(
-                icon: Icon(Icons.search, color: _s.appBarTextColor),
-                onPressed: _onSearch,
-              ),
-              PopupMenuButton<String>(
-                icon: Icon(Icons.more_vert, color: _s.appBarTextColor),
-                color: _s.menuColor,
-                surfaceTintColor: Colors.transparent,
-                onSelected: _onMenuSelected,
-                itemBuilder: (context) => const [
-                  PopupMenuItem(value: 'search', child: Text('搜索聊天记录')),
-                  PopupMenuItem(value: 'rename', child: Text('修改聊天名称')),
-                  PopupMenuItem(value: 'mood', child: Text('心情日历')),
-                  PopupMenuItem(value: 'clear', child: Text('清空聊天记录')),
-                  PopupMenuItem(value: 'settings', child: Text('设置')),
-                ],
-              ),
+            PopupMenuButton<String>(
+              icon: Icon(Icons.more_vert, color: _s.appBarTextColor),
+              color: _s.menuColor,
+              surfaceTintColor: Colors.transparent,
+              onSelected: _onMenuSelected,
+              itemBuilder: (context) => const [
+                PopupMenuItem(value: 'search', child: Text('搜索聊天记录')),
+                PopupMenuItem(value: 'rename', child: Text('修改聊天名称')),
+                PopupMenuItem(value: 'mood', child: Text('心情日历')),
+                PopupMenuItem(value: 'clear', child: Text('清空聊天记录')),
+                PopupMenuItem(value: 'settings', child: Text('设置')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  PreferredSizeWidget _multiSelectAppBar() {
+    return AppBar(
+      backgroundColor: _s.appBarColor,
+      foregroundColor: _s.appBarTextColor,
+      surfaceTintColor: Colors.transparent,
+      elevation: 0.5,
+      leading: IconButton(
+        icon: const Icon(Icons.close),
+        onPressed: _exitMultiSelect,
+      ),
+      title: Text('已选 ${_selectedIds.length} 条'),
+      actions: [
+        IconButton(
+          tooltip: '转发',
+          icon: const Icon(Icons.ios_share),
+          onPressed:
+              _selectedIds.isEmpty ? null : () => _showSnack('功能开发中'),
+        ),
+        IconButton(
+          tooltip: '删除',
+          icon: const Icon(Icons.delete_outline),
+          onPressed: _selectedIds.isEmpty ? null : _deleteSelected,
+        ),
+      ],
+    );
+  }
+
+  Widget _multiSelectBottomBar() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        color: _s.panelColor,
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            TextButton.icon(
+              onPressed:
+                  _selectedIds.isEmpty ? null : () => _showSnack('功能开发中'),
+              icon: const Icon(Icons.ios_share),
+              label: const Text('转发'),
+            ),
+            TextButton.icon(
+              onPressed: _selectedIds.isEmpty ? null : _deleteSelected,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('删除'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _jumpButton() {
+    return Material(
+      color: _s.menuColor,
+      elevation: 3,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: () {
+          _scrollToBottom();
+          setState(() => _unread = 0);
+        },
+        child: SizedBox(
+          width: 42,
+          height: 42,
+          child: Stack(
+            alignment: Alignment.center,
+            clipBehavior: Clip.none,
+            children: [
+              Icon(Icons.keyboard_arrow_down, color: _s.appBarTextColor),
+              if (_unread > 0)
+                Positioned(
+                  top: -5,
+                  right: -5,
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    constraints:
+                        const BoxConstraints(minWidth: 18, minHeight: 18),
+                    decoration: const BoxDecoration(
+                        color: Colors.red, shape: BoxShape.circle),
+                    child: Text(
+                      _unread > 99 ? '99+' : '$_unread',
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 10, height: 1.1),
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _s.chatBackgroundColor,
+      appBar: _multiSelect ? _multiSelectAppBar() : _normalAppBar(),
       body: Stack(
         children: [
           _wallpaperLayer(),
@@ -904,40 +1408,27 @@ class _ChatScreenState extends State<ChatScreen> {
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTap: _dismissAll,
-                  child: ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(vertical: 8),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final msg = _messages[index];
-                      final showTime = index == 0 ||
-                          msg.time
-                                  .difference(_messages[index - 1].time)
-                                  .abs() >=
-                              _timeSeparatorGap;
-                      return Column(
-                        children: [
-                          if (showTime) _buildTimeSeparator(msg.time),
-                          _buildMessageRow(msg),
-                        ],
-                      );
-                    },
+                  child: _messageList(),
+                ),
+              ),
+              if (!_multiSelect)
+                SafeArea(
+                  top: false,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (_quoted != null) _quoteBar(),
+                      _buildInputBar(),
+                      if (_panel == _Panel.emoji) _buildEmojiPanel(),
+                      if (_panel == _Panel.functions) _buildFunctionPanel(),
+                    ],
                   ),
                 ),
-              ),
-              SafeArea(
-                top: false,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _buildInputBar(),
-                    if (_panel == _Panel.emoji) _buildEmojiPanel(),
-                    if (_panel == _Panel.functions) _buildFunctionPanel(),
-                  ],
-                ),
-              ),
+              if (_multiSelect) _multiSelectBottomBar(),
             ],
           ),
+          if (_showJumpBtn && !_multiSelect)
+            Positioned(right: 14, bottom: 92, child: _jumpButton()),
         ],
       ),
     );

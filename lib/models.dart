@@ -70,6 +70,9 @@ const List<String> kWeekdayLabels = ['日', '一', '二', '三', '四', '五', '
 
 enum MessageKind { text, image, video, file }
 
+/// Delivery state of an outgoing (user) message (requirement 三).
+enum MessageStatus { sending, sent, read, failed }
+
 class ChatMessage {
   final String id;
   final String? text;
@@ -87,6 +90,17 @@ class ChatMessage {
   final Map<String, dynamic> metadata;
   bool favorite;
 
+  /// Delivery state (user messages only; AI messages stay [MessageStatus.sent]).
+  MessageStatus status;
+
+  /// Double-tap "like" state (requirement 六).
+  bool liked;
+
+  /// Quoted-reply payload (requirement 二): a short summary of the original
+  /// message plus its id, so the quote block can jump back to it.
+  final String? quotedSummary;
+  final String? quotedMessageId;
+
   ChatMessage({
     required this.id,
     this.text,
@@ -97,7 +111,24 @@ class ChatMessage {
     required this.time,
     Map<String, dynamic>? metadata,
     this.favorite = false,
+    this.status = MessageStatus.sent,
+    this.liked = false,
+    this.quotedSummary,
+    this.quotedMessageId,
   }) : metadata = metadata ?? const {};
+
+  /// Short one-line summary used when this message is quoted or previewed.
+  String get summary => switch (kind) {
+        MessageKind.image => '[图片]',
+        MessageKind.video => '[视频]',
+        MessageKind.file => '[文件] ${fileName ?? ''}',
+        MessageKind.text => _clip(text ?? ''),
+      };
+
+  static String _clip(String s) {
+    final t = s.replaceAll('\n', ' ').trim();
+    return t.length > 30 ? '${t.substring(0, 30)}…' : t;
+  }
 
   static String newId() =>
       'm_${DateTime.now().microsecondsSinceEpoch}_${_seq++}';
@@ -121,6 +152,10 @@ class ChatMessage {
         'time': time.toIso8601String(),
         'metadata': metadata,
         'favorite': favorite,
+        'status': status.name,
+        'liked': liked,
+        'quotedSummary': quotedSummary,
+        'quotedMessageId': quotedMessageId,
       };
 
   factory ChatMessage.fromJson(Map json) {
@@ -138,6 +173,14 @@ class ChatMessage {
       time: DateTime.parse(m['time'] as String),
       metadata: (m['metadata'] as Map?)?.cast<String, dynamic>() ?? {},
       favorite: m['favorite'] as bool? ?? false,
+      // Persisted history is always considered delivered.
+      status: MessageStatus.values.firstWhere(
+        (s) => s.name == m['status'],
+        orElse: () => MessageStatus.sent,
+      ),
+      liked: m['liked'] as bool? ?? false,
+      quotedSummary: m['quotedSummary'] as String?,
+      quotedMessageId: m['quotedMessageId'] as String?,
     );
   }
 }
